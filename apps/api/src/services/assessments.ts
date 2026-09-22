@@ -4,8 +4,10 @@ import type { Queue } from 'bullmq';
 import { schema, type AuditService } from '@aivoryx/db';
 import { hasPermission, requirePermission } from '@aivoryx/auth';
 import {
+  buildWebAssetScope,
   canTransitionAssessmentStatus,
   isAssessmentTypeCompatibleWithAsset,
+  type AssessmentScope,
   type AssessmentType,
 } from '@aivoryx/shared-types';
 import type { AssessmentJobData } from '@aivoryx/queue';
@@ -23,6 +25,32 @@ export interface CreateAssessmentInput {
   assetId: string;
   assessmentType: AssessmentType;
   assetBuildId?: string | undefined;
+}
+
+const EMPTY_SCOPE: AssessmentScope = {
+  schemes: [],
+  hosts: [],
+  ports: [],
+  allowedPathPrefixes: [],
+  exclusions: { hosts: [], paths: [] },
+};
+
+/**
+ * Builds the technical scope this assessment's scanner(s) may contact,
+ * snapshotted from the asset's config at creation time (immutable
+ * afterward — see docs/security-model.md). Only WEB/API asset configs carry
+ * a baseUrl today; ANDROID/IOS assessments get an empty scope, since no
+ * scanner targets them yet (Part A/L).
+ */
+function computeScopeForAsset(config: unknown): AssessmentScope {
+  if (config && typeof config === 'object' && 'baseUrl' in config) {
+    try {
+      return buildWebAssetScope(config as { baseUrl: string; additionalHosts?: string[] });
+    } catch {
+      return EMPTY_SCOPE;
+    }
+  }
+  return EMPTY_SCOPE;
 }
 
 async function getProjectContext(
@@ -133,6 +161,7 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
           assessmentType: input.assessmentType,
           assetBuildId: input.assetBuildId ?? null,
           createdBy: actorUserId,
+          scope: computeScopeForAsset(asset.config),
         })
         .returning();
       if (!assessment) throw new Error('Failed to create assessment');
@@ -144,11 +173,22 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
       if (!job) throw new Error('Failed to create assessment job');
 
       try {
-        const queueJob = await deps.assessmentJobsQueue.add('assessment', {
-          assessmentJobId: job.id,
-          assessmentId: assessment.id,
-          scannerName: input.assessmentType,
-        });
+        const queueJob = await deps.assessmentJobsQueue.add(
+          'assessment',
+          {
+            assessmentJobId: job.id,
+            assessmentId: assessment.id,
+            scannerName: input.assessmentType,
+          },
+          {
+            // Bounds automatic BullMQ retries to genuine transient
+            // infrastructure failures — the worker itself never rethrows
+            // (and so never triggers a retry) for a scope/SSRF/authorization
+            // rejection, only for an unexpected error. See Part R.
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+          },
+        );
         await deps.db
           .update(schema.assessmentJobs)
           .set({ queueJobId: queueJob.id ?? null, updatedAt: new Date() })
@@ -189,6 +229,18 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
       if (!context) return null;
       if (!hasPermission(context.principal, 'assessment:read')) return null;
       return context.assessment;
+    },
+
+    /** Findings the worker's scanner(s) persisted for this assessment — see apps/worker/src/assessment-processor.ts. */
+    async listFindings(identity: RequestIdentity, assessmentId: string) {
+      const context = await getAssessmentContext(deps, identity, assessmentId);
+      if (!context) return null;
+      if (!hasPermission(context.principal, 'finding:read')) return null;
+
+      return deps.db
+        .select()
+        .from(schema.findings)
+        .where(eq(schema.findings.assessmentId, assessmentId));
     },
 
     async cancel(identity: RequestIdentity, assessmentId: string, requestContext: RequestContext) {

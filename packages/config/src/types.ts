@@ -45,6 +45,10 @@ export interface AppConfig {
     scanTimeoutMs: number;
     maxResponseBytes: number;
     workerConcurrency: number;
+    connectTimeoutMs: number;
+    maxRedirects: number;
+    maxHeaderBytes: number;
+    maxRequestsPerAssessment: number;
   };
 
   ai: {

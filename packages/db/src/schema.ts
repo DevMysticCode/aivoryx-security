@@ -17,9 +17,13 @@ import type {
   AssetBuildPlatform,
   AssetStatus,
   AssetType,
+  AssessmentScope,
   AssessmentStatus,
   AssessmentJobStatus,
   AssessmentType,
+  FindingConfidence,
+  FindingSeverity,
+  FindingStatus,
 } from '@aivoryx/shared-types';
 
 // Batch 2 added identity, tenancy, authorization, and commercial foundation
@@ -114,6 +118,27 @@ export const assessmentJobStatusEnum = pgEnum('assessment_job_status', [
   'COMPLETED',
   'FAILED',
   'CANCELLED',
+]);
+
+// Batch 4 enums (scanner engine foundation).
+export const findingSeverityEnum = pgEnum('finding_severity', [
+  'INFO',
+  'LOW',
+  'MEDIUM',
+  'HIGH',
+  'CRITICAL',
+]);
+export const findingConfidenceEnum = pgEnum('finding_confidence', [
+  'LOW',
+  'MEDIUM',
+  'HIGH',
+  'CONFIRMED',
+]);
+export const findingStatusEnum = pgEnum('finding_status', [
+  'OPEN',
+  'ACKNOWLEDGED',
+  'RESOLVED',
+  'FALSE_POSITIVE',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -422,6 +447,15 @@ export const assessments = pgTable(
     assessmentType: assessmentTypeEnum('assessment_type').$type<AssessmentType>().notNull(),
     assetBuildId: uuid('asset_build_id').references(() => assetBuilds.id, { onDelete: 'set null' }),
     status: assessmentStatusEnum('status').$type<AssessmentStatus>().notNull().default('QUEUED'),
+    // The explicit technical scope this assessment's scanner(s) may contact —
+    // a snapshot taken from the asset's config at creation time, immutable
+    // afterward even if the asset's config later changes. NOT the same thing
+    // as assets.authorization_confirmed; see docs/security-model.md and
+    // packages/shared-types/src/scope.ts.
+    scope: jsonb('scope')
+      .$type<AssessmentScope>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -467,6 +501,68 @@ export const assessmentJobs = pgTable(
   },
   (table) => ({
     assessmentIdIdx: index('assessment_jobs_assessment_id_idx').on(table.assessmentId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Findings (structured scanner output — Batch 4). One row per deduplicated
+// observation; see packages/scanner-core's computeFindingFingerprint.
+// ---------------------------------------------------------------------------
+
+export const findings = pgTable(
+  'findings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    scanner: text('scanner').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    severity: findingSeverityEnum('severity').$type<FindingSeverity>().notNull(),
+    confidence: findingConfidenceEnum('confidence').$type<FindingConfidence>().notNull(),
+    category: text('category').notNull(),
+    status: findingStatusEnum('status').$type<FindingStatus>().notNull().default('OPEN'),
+    target: text('target').notNull(),
+    // Deterministic dedup key (assessment + scanner + category + normalized
+    // target + finding key). Enforced unique per assessment so a retried job
+    // can never create a duplicate row — see Part O.
+    fingerprint: text('fingerprint').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assessmentIdIdx: index('findings_assessment_id_idx').on(table.assessmentId),
+    assessmentFingerprintUnique: uniqueIndex('findings_assessment_fingerprint_unique').on(
+      table.assessmentId,
+      table.fingerprint,
+    ),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Evidence (sanitized request/response metadata backing a finding — Batch 4).
+// Never raw secrets/cookies/authorization headers/full response bodies — see
+// docs/security-model.md and packages/scanners/http-reachability.
+// ---------------------------------------------------------------------------
+
+export const evidence = pgTable(
+  'evidence',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    findingId: uuid('finding_id')
+      .notNull()
+      .references(() => findings.id, { onDelete: 'cascade' }),
+    // Structured, size-limited, already-sanitized evidence (status/headers/
+    // timing/URLs) — never a raw response body. See Part N.
+    data: jsonb('data')
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    findingIdIdx: index('evidence_finding_id_idx').on(table.findingId),
   }),
 );
 
@@ -614,3 +710,9 @@ export type NewAssessment = typeof assessments.$inferInsert;
 
 export type AssessmentJob = typeof assessmentJobs.$inferSelect;
 export type NewAssessmentJob = typeof assessmentJobs.$inferInsert;
+
+export type Finding = typeof findings.$inferSelect;
+export type NewFinding = typeof findings.$inferInsert;
+
+export type Evidence = typeof evidence.$inferSelect;
+export type NewEvidence = typeof evidence.$inferInsert;

@@ -22,3 +22,14 @@ export {
   canTransitionAssessmentJobStatus,
 } from './assessments.js';
 export type { AssessmentType, AssessmentStatus, AssessmentJobStatus } from './assessments.js';
+
+export { ASSESSMENT_SCHEMES, isAssessmentScheme, buildWebAssetScope } from './scope.js';
+export type { AssessmentScheme, AssessmentScope, AssessmentScopeExclusions } from './scope.js';
+
+export {
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_STATUSES,
+  isFindingSeverity,
+} from './findings.js';
+export type { FindingSeverity, FindingConfidence, FindingStatus } from './findings.js';

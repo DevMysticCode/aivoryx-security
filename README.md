@@ -2,12 +2,14 @@
 
 Application security assessment platform — monorepo.
 
-**Status:** Batch 3 (Human Identity + Security Assessment Domain) complete. Human
-registration/login, organizations with automatic OWNER bootstrap, membership
-management, and the full Project → Asset → Assessment → AssessmentJob domain model
-are implemented. **No scanner, crawler, or outbound-target-request logic exists
-yet** — see [docs/security-model.md](docs/security-model.md) for what's implemented
-versus still future.
+**Status:** Batch 4 (Security Engine Foundation) complete. Human identity, the full
+Project → Asset → Assessment → AssessmentJob domain model, an explicit assessment
+scope, SSRF protection, a DNS-rebinding-resistant safe HTTP client, a scanner
+plugin architecture, and one non-invasive scanner (HTTP reachability) are
+implemented — `apps/worker` now actually executes assessments end to end. **No
+vulnerability detection/exploitation, crawling, or mobile scanning exists yet** —
+see [docs/security-model.md](docs/security-model.md) for what's implemented versus
+still future.
 
 ## Structure
 
@@ -29,8 +31,9 @@ versus still future.
                   crypto — no scanner/business logic
   billing         Provider-agnostic billing domain: plan catalog, seat math,
                   BillingProvider interface (no live payment integration)
-  scanner-core    ScannerPlugin interface, SafeHttpClient, orchestration primitives
-  scanners        Individual scanner plugin packages (none yet)
+  scanner-core    ScannerPlugin interface, AssessmentScope/SSRF validation,
+                  DNS-rebinding-resistant SafeHttpClient, finding deduplication
+  scanners        Individual scanner plugin packages: http-reachability (Batch 4)
   ai-core         AIProvider interface + providers (optional, not wired in yet)
   report-core     HTML/PDF report templating
 /infrastructure
@@ -85,4 +88,4 @@ and `apps/api/package.json`'s `test:integration` script.
 - [docs/architecture.md](docs/architecture.md) — system overview
 - [docs/authorization.md](docs/authorization.md) — platform vs. tenant identity, roles/permissions, API keys, tenant isolation
 - [docs/billing.md](docs/billing.md) — plans, subscriptions, seats, payments
-- [docs/security-model.md](docs/security-model.md) — the future assessment authorization/scope model (not implemented yet)
+- [docs/security-model.md](docs/security-model.md) — assessment authorization/scope model, SSRF protections, and the scanner pipeline (implemented vs. future)

@@ -18,11 +18,13 @@ Redis / BullMQ (packages/queue)                  │
 Batch 1 established the runnable skeleton of this diagram: config, logging, the
 database/queue clients, health/readiness checks, and process lifecycle. Batch 2 added
 the identity/tenancy/billing foundation (organizations, membership, API keys, audit).
-Batch 3 adds real human authentication and the security-assessment domain model
-(projects → assets → assessments → assessment jobs) that later batches' scanner
-engine will operate on. **No scanner, crawler, or outbound-target-request logic
-exists yet** — an assessment being `QUEUED` and its job reaching the worker proves the
-pipeline; the worker still only logs and acknowledges (unchanged since Batch 1).
+Batch 3 added real human authentication and the security-assessment domain model
+(projects → assets → assessments → assessment jobs). Batch 4 adds the first real
+scanner engine: an explicit assessment scope, SSRF protection, a DNS-rebinding-
+resistant safe HTTP client, a scanner plugin architecture, and one non-invasive HTTP
+reachability scanner — `apps/worker` now actually executes assessments end to end
+(QUEUED → RUNNING → COMPLETED/FAILED) instead of only logging and acknowledging. See
+[security-model.md](security-model.md) for the full detail.
 
 ## Domain model
 
@@ -31,8 +33,10 @@ Organization
   └── Project                (packages/db: projects)
         └── Asset             (assets — WEB | API | ANDROID | IOS)
               ├── AssetBuild   (asset_builds — mobile build metadata only, no binaries)
-              └── Assessment   (assessments — WEB | API | ANDROID_STATIC | ANDROID_DYNAMIC | IOS_STATIC | IOS_DYNAMIC)
-                    └── AssessmentJob  (assessment_jobs — the row a BullMQ job id points back to)
+              └── Assessment   (assessments — WEB | API | ANDROID_STATIC | ANDROID_DYNAMIC | IOS_STATIC | IOS_DYNAMIC; carries an immutable `scope` snapshot)
+                    ├── AssessmentJob  (assessment_jobs — the row a BullMQ job id points back to)
+                    └── Finding        (findings — one per deduplicated scanner observation)
+                          └── Evidence (evidence — sanitized, size-capped request/response metadata)
 ```
 
 - **Asset type determines valid assessment types** —
@@ -45,24 +49,27 @@ Organization
 - **Assessment lifecycle** is a small state machine
   (`packages/shared-types`'s `canTransitionAssessmentStatus`):
   `QUEUED → RUNNING → COMPLETED | FAILED | CANCELLED` (or `QUEUED → CANCELLED`
-  directly). Only the `QUEUED → CANCELLED` transition is reachable via the API today
-  (`POST /assessments/:id/cancel`) — `RUNNING`/`COMPLETED`/`FAILED` are reserved for a
-  future worker that actually executes something; the API never allows an arbitrary
-  status write.
+  directly). `QUEUED → CANCELLED` is reachable via the API
+  (`POST /assessments/:id/cancel`); `QUEUED → RUNNING → COMPLETED/FAILED` is driven
+  entirely by `apps/worker` (Batch 4) — the API never allows an arbitrary status
+  write.
 
 ## Package/app responsibilities
 
-| Package/app                          | Owns                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/config`                    | Env-var schema/validation, the single `AppConfig` shape. No other module reads `process.env` directly.                                                                                                                                                                                                                                    |
-| `packages/logger`                    | Structured (pino) logging with secret redaction.                                                                                                                                                                                                                                                                                          |
-| `packages/shared-types`              | Domain enums/types shared across apps/packages: `AssetType`, `AssessmentType`, `AssessmentStatus`, `AssessmentJobStatus`, the asset/assessment compatibility matrix, and the status-transition rules — the single source of truth so these strings are never duplicated across `packages/db`, `apps/api`, and (eventually) `apps/worker`. |
-| `packages/db`                        | Drizzle schema, migrations, database client, and the audit-event write service (`createAuditService`).                                                                                                                                                                                                                                    |
-| `packages/queue`                     | Redis connection, BullMQ queue/worker factories, typed job payloads. No business logic.                                                                                                                                                                                                                                                   |
-| `packages/auth`                      | Authentication/authorization **primitives only**: principal types, roles, permissions, the role→permission table, password hashing (Argon2id), session-token crypto, API-key crypto. No database access, no HTTP, no domain logic — see [authorization.md](authorization.md).                                                             |
-| `packages/billing`                   | Provider-agnostic billing **domain types and pure functions**: plan catalog, seat-usage math, the `BillingProvider` interface. Untouched in Batch 3 beyond what Batch 2 already established — see [billing.md](billing.md).                                                                                                               |
-| `apps/api`                           | HTTP concerns: routing, request validation (zod), the dual session/API-key auth context, and the service layer (`apps/api/src/services/*`) that combines authorization checks with `packages/db` queries and `packages/queue` enqueues.                                                                                                   |
-| `apps/worker` / `apps/report-worker` | BullMQ consumers and process lifecycle. Still placeholder job processing — no scanning or report generation.                                                                                                                                                                                                                              |
+| Package/app             | Owns                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/config`       | Env-var schema/validation, the single `AppConfig` shape. No other module reads `process.env` directly.                                                                                                                                                                                                                                    |
+| `packages/logger`       | Structured (pino) logging with secret redaction.                                                                                                                                                                                                                                                                                          |
+| `packages/shared-types` | Domain enums/types shared across apps/packages: `AssetType`, `AssessmentType`, `AssessmentStatus`, `AssessmentJobStatus`, the asset/assessment compatibility matrix, and the status-transition rules — the single source of truth so these strings are never duplicated across `packages/db`, `apps/api`, and (eventually) `apps/worker`. |
+| `packages/db`           | Drizzle schema, migrations, database client, and the audit-event write service (`createAuditService`).                                                                                                                                                                                                                                    |
+| `packages/queue`        | Redis connection, BullMQ queue/worker factories, typed job payloads. No business logic.                                                                                                                                                                                                                                                   |
+| `packages/auth`         | Authentication/authorization **primitives only**: principal types, roles, permissions, the role→permission table, password hashing (Argon2id), session-token crypto, API-key crypto. No database access, no HTTP, no domain logic — see [authorization.md](authorization.md).                                                             |
+| `packages/billing`      | Provider-agnostic billing **domain types and pure functions**: plan catalog, seat-usage math, the `BillingProvider` interface. Untouched in Batch 3 beyond what Batch 2 already established — see [billing.md](billing.md).                                                                                                               |
+| `apps/api`              | HTTP concerns: routing, request validation (zod), the dual session/API-key auth context, and the service layer (`apps/api/src/services/*`) that combines authorization checks with `packages/db` queries and `packages/queue` enqueues. **Never makes a target HTTP request itself.**                                                     |
+| `packages/scanner-core` | The scanner plugin framework (Batch 4): `ScannerPlugin`/`ScannerContext`, `AssessmentScope` validation, SSRF policy, the DNS-rebinding-resistant `SafeHttpClient`, finding-fingerprint deduplication. No database access, no HTTP server.                                                                                                 |
+| `packages/scanners/*`   | Individual scanner plugins. Only `http-reachability` exists (Batch 4) — see [security-model.md](security-model.md).                                                                                                                                                                                                                       |
+| `apps/worker`           | Consumes `assessment-jobs`, loads authoritative state from `packages/db`, selects and runs applicable scanner plugins via `packages/scanner-core`, persists findings/evidence. The only app that makes outbound requests to a target.                                                                                                     |
+| `apps/report-worker`    | BullMQ consumer and process lifecycle. Still placeholder job processing — no report generation yet.                                                                                                                                                                                                                                       |
 
 ### Why the service layer lives in `apps/api`, not `packages/db`
 
@@ -92,10 +99,24 @@ persistence-agnostic.
 5. Mutations call `audit.record(...)` (`packages/db`'s `createAuditService`), which
    redacts secret-shaped metadata keys before writing.
 
+## Control plane vs. scanner plane (Part Y)
+
+`apps/api` (control plane) owns authentication, authorization, and the
+project/asset/assessment domain — it decides _whether_ an assessment may run and
+_what scope_ it's allowed, but never makes a request to a target itself.
+`apps/worker` (scanner plane) owns target network access, scope/SSRF enforcement,
+scanner execution, and finding/evidence generation — it never makes an
+authorization decision the API hasn't already made (it re-checks
+`authorizationConfirmed` defensively, but never grants access the API denied). This
+separation is mandatory: it means a bug in scanner code can never accidentally skip
+an authentication/authorization check, and a bug in the API can never accidentally
+issue an unscoped outbound request.
+
 ## What is deliberately not implemented yet
 
-- Web crawling, HTTP target scanning, SSRF/vulnerability/finding logic, report
-  generation, mobile build processing, AI — see
+- Vulnerability detection/exploitation of any kind, crawling, browser automation/JS
+  execution, API fuzzing/OpenAPI-driven testing, mobile scanning, report
+  generation, AI — see
   [security-model.md](security-model.md) for the authorization/scope model that will
   govern the scanner once it exists.
 - Live billing-provider integration (Stripe or otherwise) — `packages/billing`

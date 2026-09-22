@@ -1,5 +1,5 @@
 {
-  "name": "@aivoryx/scanner-core",
+  "name": "@aivoryx/scanner-http-reachability",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aivoryx/config": "workspace:*",
+    "@aivoryx/scanner-core": "workspace:*",
     "@aivoryx/shared-types": "workspace:*"
   },
   "devDependencies": {

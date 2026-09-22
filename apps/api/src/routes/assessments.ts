@@ -56,6 +56,18 @@ export function registerAssessmentRoutes(
     return { assessment };
   });
 
+  app.get('/api/v1/assessments/:assessmentId/findings', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { assessmentId } = request.params as { assessmentId: string };
+
+    const findings = await assessmentsService.listFindings(
+      identityFromRequest(request),
+      assessmentId,
+    );
+    if (findings === null) return notFound(reply, request.id);
+    return { findings };
+  });
+
   app.post('/api/v1/assessments/:assessmentId/cancel', async (request, reply) => {
     requireAnyIdentity(request);
     const { assessmentId } = request.params as { assessmentId: string };

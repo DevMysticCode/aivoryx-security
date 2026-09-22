@@ -140,18 +140,30 @@ importers:
       '@aivoryx/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@aivoryx/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@aivoryx/logger':
         specifier: workspace:*
         version: link:../../packages/logger
       '@aivoryx/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@aivoryx/scanner-core':
+        specifier: workspace:*
+        version: link:../../packages/scanner-core
+      '@aivoryx/scanner-http-reachability':
+        specifier: workspace:*
+        version: link:../../packages/scanners/http-reachability
       '@aivoryx/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       bullmq:
         specifier: ^5.28.1
         version: 5.81.5(supports-color@7.2.0)
+      drizzle-orm:
+        specifier: ^0.36.1
+        version: 0.36.4(@types/react@18.3.31)(postgres@3.4.9)(react@18.3.1)
     devDependencies:
       '@types/node':
         specifier: ^22.7.5
@@ -283,13 +295,48 @@ importers:
         version: 5.9.3
 
   packages/scanner-core:
+    dependencies:
+      '@aivoryx/config':
+        specifier: workspace:*
+        version: link:../config
+      '@aivoryx/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
     devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.4)(supports-color@7.2.0)
+
+  packages/scanners/http-reachability:
+    dependencies:
+      '@aivoryx/scanner-core':
+        specifier: workspace:*
+        version: link:../../scanner-core
+      '@aivoryx/shared-types':
+        specifier: workspace:*
+        version: link:../../shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.4)(supports-color@7.2.0)
 
   packages/shared-types:
     devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
       typescript:
         specifier: ^5.6.3
         version: 5.9.3

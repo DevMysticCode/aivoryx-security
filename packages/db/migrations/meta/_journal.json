@@ -15,6 +15,13 @@
       "when": 1790051297003,
       "tag": "0001_regular_kate_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790054437984,
+      "tag": "0002_handy_professor_monster",
+      "breakpoints": true
     }
   ]
 }

@@ -11,6 +11,9 @@
     { "path": "../../packages/shared-types" },
     { "path": "../../packages/config" },
     { "path": "../../packages/logger" },
-    { "path": "../../packages/queue" }
+    { "path": "../../packages/queue" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/scanner-core" },
+    { "path": "../../packages/scanners/http-reachability" }
   ]
 }

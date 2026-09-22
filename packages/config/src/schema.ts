@@ -81,6 +81,14 @@ export const rawEnvSchema = z
     SCAN_TIMEOUT_MS: intFromEnv(z.number().int().positive(), 120_000),
     MAX_RESPONSE_BYTES: intFromEnv(z.number().int().positive(), 1_000_000),
     WORKER_CONCURRENCY: intFromEnv(z.number().int().positive(), 2),
+    // --- Scanner HTTP client (Batch 4) -------------------------------------------
+    SCAN_CONNECT_TIMEOUT_MS: intFromEnv(z.number().int().positive(), 5_000),
+    SCAN_MAX_REDIRECTS: intFromEnv(z.number().int().min(0).max(10), 3),
+    SCAN_MAX_HEADER_BYTES: intFromEnv(z.number().int().positive(), 32_768),
+    // Upper bound on outbound HTTP requests a single scanner run may issue —
+    // deliberately distinct from WORKER_CONCURRENCY (which bounds concurrent
+    // BullMQ jobs, not outbound requests per job). See Part S.
+    SCAN_MAX_REQUESTS_PER_ASSESSMENT: intFromEnv(z.number().int().positive(), 20),
 
     // --- AI (optional, disabled by default) --------------------------------------
     AI_ENABLED: booleanFromEnv(false),

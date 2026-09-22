@@ -88,6 +88,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       scanTimeoutMs: raw.SCAN_TIMEOUT_MS,
       maxResponseBytes: raw.MAX_RESPONSE_BYTES,
       workerConcurrency: raw.WORKER_CONCURRENCY,
+      connectTimeoutMs: raw.SCAN_CONNECT_TIMEOUT_MS,
+      maxRedirects: raw.SCAN_MAX_REDIRECTS,
+      maxHeaderBytes: raw.SCAN_MAX_HEADER_BYTES,
+      maxRequestsPerAssessment: raw.SCAN_MAX_REQUESTS_PER_ASSESSMENT,
     },
 
     ai: {
@@ -131,6 +135,10 @@ export function toSafeConfigSummary(config: AppConfig): Record<string, unknown> 
       scanTimeoutMs: config.security.scanTimeoutMs,
       maxResponseBytes: config.security.maxResponseBytes,
       workerConcurrency: config.security.workerConcurrency,
+      connectTimeoutMs: config.security.connectTimeoutMs,
+      maxRedirects: config.security.maxRedirects,
+      maxHeaderBytes: config.security.maxHeaderBytes,
+      maxRequestsPerAssessment: config.security.maxRequestsPerAssessment,
     },
     ai: {
       enabled: config.ai.enabled,
