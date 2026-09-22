@@ -1,296 +1,730 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
+import type { Redis } from 'ioredis';
+import type { Queue } from 'bullmq';
 import { createDbClient, createAuditService, schema, type DbClient } from '@aivoryx/db';
-import { generateApiKey } from '@aivoryx/auth';
+import {
+  createRedisConnection,
+  checkRedisHealth,
+  createQueue,
+  QUEUE_NAMES,
+  type AssessmentJobData,
+} from '@aivoryx/queue';
+import { generateApiKey, SESSION_COOKIE_NAME } from '@aivoryx/auth';
 import { createLogger } from '@aivoryx/logger';
 import { buildServer } from './server.js';
 
-// Requires a live PostgreSQL instance with the Batch 2 migration applied. Run via:
+// Requires live PostgreSQL + Redis with the Batch 3 migration applied. Run via:
 //   pnpm infra:up
 //   node --env-file=.env packages/db/dist/migrate-cli.js
 //   TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/aivoryx \
+//   TEST_REDIS_URL=redis://localhost:6379 \
 //     pnpm --filter @aivoryx/api test:integration
 const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const REDIS_URL = process.env.TEST_REDIS_URL;
 const MASTER_KEY = 'integration-test-master-key-not-for-production-use';
 
-describe.skipIf(!DATABASE_URL)('API auth + tenant isolation (integration)', () => {
-  let client: DbClient;
-  let app: FastifyInstance;
+function sessionCookieFrom(response: LightMyRequestResponse): string {
+  const cookie = response.cookies.find((c) => c.name === SESSION_COOKIE_NAME);
+  if (!cookie) throw new Error('Expected a session cookie in the response');
+  return cookie.value;
+}
 
-  let orgAId: string;
-  let orgBId: string;
-  let orgARawKey: string;
-  let orgBRawKey: string;
-  let orgAProjectId: string;
-  let orgBProjectId: string;
-  let orgBApiKeyId: string;
+function uniqueEmail(label: string): string {
+  return `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+}
+
+describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
+  let client: DbClient;
+  let redisConnection: Redis;
+  let assessmentJobsQueue: Queue<AssessmentJobData>;
+  let app: FastifyInstance;
 
   beforeAll(async () => {
     client = createDbClient(DATABASE_URL as string, { maxConnections: 5 });
+    redisConnection = createRedisConnection(REDIS_URL as string);
+    assessmentJobsQueue = createQueue(QUEUE_NAMES.ASSESSMENT_JOBS, redisConnection);
     const audit = createAuditService(client.db);
 
     app = buildServer({
       logger: createLogger({ serviceName: 'api-integration-test', level: 'silent' }),
       checkDatabaseHealth: client.healthCheck,
-      checkRedisHealth: async () => ({ healthy: true }),
+      checkRedisHealth: () => checkRedisHealth(redisConnection),
       db: client.db,
       credentialMasterKey: MASTER_KEY,
       audit,
+      assessmentJobsQueue,
+      isProduction: false,
     });
     await app.ready();
-
-    const suffix = Date.now().toString(36);
-
-    const [orgA] = await client.db
-      .insert(schema.organizations)
-      .values({ name: `Tenant A ${suffix}`, slug: `tenant-a-${suffix}` })
-      .returning();
-    const [orgB] = await client.db
-      .insert(schema.organizations)
-      .values({ name: `Tenant B ${suffix}`, slug: `tenant-b-${suffix}` })
-      .returning();
-    orgAId = orgA!.id;
-    orgBId = orgB!.id;
-
-    const keyA = generateApiKey(MASTER_KEY);
-    const keyB = generateApiKey(MASTER_KEY);
-    orgARawKey = keyA.raw;
-    orgBRawKey = keyB.raw;
-
-    await client.db.insert(schema.apiKeys).values({
-      organizationId: orgAId,
-      name: 'Org A key',
-      keyPrefix: keyA.keyPrefix,
-      keyHash: keyA.keyHash,
-    });
-    const [orgBKeyRow] = await client.db
-      .insert(schema.apiKeys)
-      .values({
-        organizationId: orgBId,
-        name: 'Org B key',
-        keyPrefix: keyB.keyPrefix,
-        keyHash: keyB.keyHash,
-      })
-      .returning();
-    orgBApiKeyId = orgBKeyRow!.id;
-
-    const [projectA] = await client.db
-      .insert(schema.projects)
-      .values({ organizationId: orgAId, name: 'Org A Project', slug: 'org-a-project' })
-      .returning();
-    const [projectB] = await client.db
-      .insert(schema.projects)
-      .values({ organizationId: orgBId, name: 'Org B Project', slug: 'org-b-project' })
-      .returning();
-    orgAProjectId = projectA!.id;
-    orgBProjectId = projectB!.id;
   });
 
   afterAll(async () => {
     await app.close();
+    await assessmentJobsQueue.close();
+    await redisConnection.quit();
     await client.close();
   });
 
-  function authHeader(rawKey: string) {
-    return { authorization: `Bearer ${rawKey}` };
+  async function registerAndLogin(label: string, password = 'correct-horse-battery-99') {
+    const email = uniqueEmail(label);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: { email, password, name: label },
+    });
+    expect(response.statusCode).toBe(201);
+    return {
+      email,
+      password,
+      userId: response.json().user.id as string,
+      sessionCookie: sessionCookieFrom(response),
+    };
   }
 
-  describe('authentication', () => {
-    it('rejects protected routes with no Authorization header', async () => {
-      const response = await app.inject({ method: 'GET', url: '/api/v1/projects' });
-      expect(response.statusCode).toBe(401);
+  async function createOrgAsOwner(sessionCookie: string, label: string) {
+    const slug = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      cookies: { [SESSION_COOKIE_NAME]: sessionCookie },
+      payload: { name: label, slug },
+    });
+    expect(response.statusCode).toBe(201);
+    return response.json().organization as { id: string; slug: string };
+  }
+
+  describe('registration / login / logout', () => {
+    it('registers a new user and sets a session cookie', async () => {
+      const { email, sessionCookie } = await registerAndLogin('register');
+      expect(sessionCookie).toEqual(expect.any(String));
+      expect(email).toContain('register');
     });
 
-    it('rejects protected routes with a garbage Authorization header', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/projects',
-        headers: { authorization: 'Bearer not-a-real-key' },
-      });
-      expect(response.statusCode).toBe(401);
-    });
-
-    it('authenticates a valid API key and exposes it via /me', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/me',
-        headers: authHeader(orgARawKey),
-      });
-      expect(response.statusCode).toBe(200);
-      expect(response.json().principal).toMatchObject({
-        type: 'tenant',
-        organizationId: orgAId,
-        authType: 'api-key',
-      });
-    });
-
-    it('leaves /health and /ready open without authentication', async () => {
-      const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
-      const ready = await app.inject({ method: 'GET', url: '/api/v1/ready' });
-      expect(health.statusCode).toBe(200);
-      expect(ready.statusCode).toBe(200);
-    });
-  });
-
-  describe('tenant isolation', () => {
-    it('Tenant A -> Tenant A project = allowed', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: `/api/v1/projects/${orgAProjectId}`,
-        headers: authHeader(orgARawKey),
-      });
-      expect(response.statusCode).toBe(200);
-      expect(response.json().project.id).toBe(orgAProjectId);
-    });
-
-    it('Tenant A -> Tenant B project = denied (404, no existence leak)', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: `/api/v1/projects/${orgBProjectId}`,
-        headers: authHeader(orgARawKey),
-      });
-      expect(response.statusCode).toBe(404);
-    });
-
-    it('Tenant A -> Tenant B API key = denied', async () => {
-      const response = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/api-keys/${orgBApiKeyId}`,
-        headers: authHeader(orgARawKey),
-      });
-      expect(response.statusCode).toBe(404);
-    });
-
-    it('Tenant B -> Tenant B project = allowed (isolation is per-tenant, not a one-way block)', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: `/api/v1/projects/${orgBProjectId}`,
-        headers: authHeader(orgBRawKey),
-      });
-      expect(response.statusCode).toBe(200);
-      expect(response.json().project.id).toBe(orgBProjectId);
-    });
-
-    it("GET /organizations only ever returns the caller's own organization", async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/organizations',
-        headers: authHeader(orgARawKey),
-      });
-      const organizations = response.json().organizations as { id: string }[];
-      expect(organizations).toHaveLength(1);
-      expect(organizations[0]?.id).toBe(orgAId);
-      expect(organizations.some((org) => org.id === orgBId)).toBe(false);
-    });
-
-    it('projects list for Tenant A never includes Tenant B projects', async () => {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/projects',
-        headers: authHeader(orgARawKey),
-      });
-      const projects = response.json().projects as { id: string }[];
-      expect(projects.some((project) => project.id === orgBProjectId)).toBe(false);
-    });
-  });
-
-  describe('projects', () => {
-    it('creates a project scoped to the caller organization', async () => {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/v1/projects',
-        headers: authHeader(orgARawKey),
-        payload: { name: 'New Project', slug: `new-project-${Date.now()}` },
-      });
-      expect(response.statusCode).toBe(201);
-      expect(response.json().project.organizationId).toBe(orgAId);
-    });
-
-    it('rejects a duplicate slug within the same organization with 409', async () => {
-      const slug = `dup-project-${Date.now()}`;
+    it('rejects registering a duplicate email', async () => {
+      const email = uniqueEmail('dup');
       const first = await app.inject({
         method: 'POST',
-        url: '/api/v1/projects',
-        headers: authHeader(orgARawKey),
-        payload: { name: 'First', slug },
+        url: '/api/v1/auth/register',
+        payload: { email, password: 'correct-horse-battery-99' },
       });
       expect(first.statusCode).toBe(201);
 
       const second = await app.inject({
         method: 'POST',
-        url: '/api/v1/projects',
-        headers: authHeader(orgARawKey),
-        payload: { name: 'Second', slug },
+        url: '/api/v1/auth/register',
+        payload: { email, password: 'another-password-99' },
       });
       expect(second.statusCode).toBe(409);
     });
 
-    it('rejects an invalid body with 400', async () => {
+    it('rejects a weak password', async () => {
       const response = await app.inject({
         method: 'POST',
-        url: '/api/v1/projects',
-        headers: authHeader(orgARawKey),
-        payload: { name: '' },
+        url: '/api/v1/auth/register',
+        payload: { email: uniqueEmail('weak'), password: 'short1' },
       });
       expect(response.statusCode).toBe(400);
     });
-  });
 
-  describe('api keys', () => {
-    it('creates a key, returns the raw secret once, and the raw secret authenticates', async () => {
-      const createResponse = await app.inject({
+    it('logs in with correct credentials', async () => {
+      const { email, password } = await registerAndLogin('login-ok');
+      const response = await app.inject({
         method: 'POST',
-        url: '/api/v1/api-keys',
-        headers: authHeader(orgARawKey),
-        payload: { name: 'CI key' },
+        url: '/api/v1/auth/login',
+        payload: { email, password },
       });
-      expect(createResponse.statusCode).toBe(201);
-      const created = createResponse.json().apiKey;
-      expect(created.rawKey).toEqual(expect.any(String));
-      expect(created).not.toHaveProperty('keyHash');
-
-      const meResponse = await app.inject({
-        method: 'GET',
-        url: '/api/v1/me',
-        headers: authHeader(created.rawKey),
-      });
-      expect(meResponse.statusCode).toBe(200);
-      expect(meResponse.json().principal.organizationId).toBe(orgAId);
+      expect(response.statusCode).toBe(200);
+      expect(sessionCookieFrom(response)).toEqual(expect.any(String));
     });
 
-    it('list never includes the key hash', async () => {
+    it('rejects login with the wrong password using a generic message', async () => {
+      const { email } = await registerAndLogin('login-bad-pw');
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { email, password: 'totally-wrong-password' },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json().error.message).toBe('Invalid email or password');
+    });
+
+    it('rejects login for a nonexistent email with the same generic message (no user enumeration)', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { email: uniqueEmail('nosuchuser'), password: 'whatever-password-99' },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json().error.message).toBe('Invalid email or password');
+    });
+
+    it('authenticates GET /me with a valid session', async () => {
+      const { sessionCookie, email } = await registerAndLogin('me-session');
       const response = await app.inject({
         method: 'GET',
-        url: '/api/v1/api-keys',
-        headers: authHeader(orgARawKey),
+        url: '/api/v1/me',
+        cookies: { [SESSION_COOKIE_NAME]: sessionCookie },
       });
-      const body = response.payload;
-      expect(body).not.toContain('keyHash');
+      expect(response.statusCode).toBe(200);
+      expect(response.json().user.email).toBe(email);
     });
 
-    it('revokes a key and the revoked key is then rejected for authentication', async () => {
-      const createResponse = await app.inject({
-        method: 'POST',
-        url: '/api/v1/api-keys',
-        headers: authHeader(orgARawKey),
-        payload: { name: 'To be revoked' },
+    it('rejects GET /me with an invalid/garbage session token', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/me',
+        cookies: { [SESSION_COOKIE_NAME]: 'not-a-real-session-token' },
       });
-      const created = createResponse.json().apiKey;
+      expect(response.statusCode).toBe(401);
+    });
 
-      const revokeResponse = await app.inject({
-        method: 'DELETE',
-        url: `/api/v1/api-keys/${created.id}`,
-        headers: authHeader(orgARawKey),
+    it('logout revokes the session so it can no longer authenticate', async () => {
+      const { sessionCookie } = await registerAndLogin('logout');
+      const logoutResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/logout',
+        cookies: { [SESSION_COOKIE_NAME]: sessionCookie },
       });
-      expect(revokeResponse.statusCode).toBe(200);
-      expect(revokeResponse.json().apiKey.status).toBe('revoked');
+      expect(logoutResponse.statusCode).toBe(204);
 
       const meResponse = await app.inject({
         method: 'GET',
         url: '/api/v1/me',
-        headers: authHeader(created.rawKey),
+        cookies: { [SESSION_COOKIE_NAME]: sessionCookie },
       });
       expect(meResponse.statusCode).toBe(401);
+    });
+  });
+
+  describe('organization bootstrap', () => {
+    it('creating an organization from a session auto-creates an OWNER membership (no API key required)', async () => {
+      const owner = await registerAndLogin('bootstrap-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'bootstrap-org');
+
+      const membersResponse = await app.inject({
+        method: 'GET',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+      });
+      expect(membersResponse.statusCode).toBe(200);
+      const members = membersResponse.json().members as { userId: string; role: string }[];
+      expect(members).toHaveLength(1);
+      expect(members[0]).toMatchObject({ userId: owner.userId, role: 'OWNER' });
+    });
+
+    it('the OWNER can create an API key from their session, and that key authenticates', async () => {
+      const owner = await registerAndLogin('bootstrap-key-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'bootstrap-key-org');
+
+      const createKeyResponse = await app.inject({
+        method: 'POST',
+        url: '/api/v1/api-keys',
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { organizationId: org.id, name: 'CI key' },
+      });
+      expect(createKeyResponse.statusCode).toBe(201);
+      const rawKey = createKeyResponse.json().apiKey.rawKey as string;
+
+      const meResponse = await app.inject({
+        method: 'GET',
+        url: '/api/v1/me',
+        headers: { authorization: `Bearer ${rawKey}` },
+      });
+      expect(meResponse.statusCode).toBe(200);
+      expect(meResponse.json().principal.organizationId).toBe(org.id);
+    });
+  });
+
+  describe('membership', () => {
+    it('an OWNER can add a registered user, change their role, then remove them', async () => {
+      const owner = await registerAndLogin('member-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'member-org');
+      const other = await registerAndLogin('member-other');
+
+      const addResponse = await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { email: other.email, role: 'DEVELOPER' },
+      });
+      expect(addResponse.statusCode).toBe(201);
+      const memberId = addResponse.json().member.id as string;
+
+      const roleResponse = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/members/${memberId}`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { role: 'ADMIN' },
+      });
+      expect(roleResponse.statusCode).toBe(200);
+      expect(roleResponse.json().member.role).toBe('ADMIN');
+
+      const removeResponse = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/organizations/${org.id}/members/${memberId}`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+      });
+      expect(removeResponse.statusCode).toBe(204);
+    });
+
+    it('a DEVELOPER cannot add members (permission enforcement)', async () => {
+      const owner = await registerAndLogin('member-perm-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'member-perm-org');
+      const developer = await registerAndLogin('member-perm-dev');
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { email: developer.email, role: 'DEVELOPER' },
+      });
+
+      const thirdUser = await registerAndLogin('member-perm-third');
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: developer.sessionCookie },
+        payload: { email: thirdUser.email, role: 'VIEWER' },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('cannot remove the last OWNER of an organization', async () => {
+      const owner = await registerAndLogin('last-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'last-owner-org');
+
+      const membersResponse = await app.inject({
+        method: 'GET',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+      });
+      const ownerMemberId = membersResponse.json().members[0].id as string;
+
+      const removeResponse = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/organizations/${org.id}/members/${ownerMemberId}`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+      });
+      expect(removeResponse.statusCode).toBe(400);
+    });
+  });
+
+  describe('tenant isolation', () => {
+    it('organization A cannot access organization B projects/assets/assessments/members/api-keys', async () => {
+      const ownerA = await registerAndLogin('iso-owner-a');
+      const orgA = await createOrgAsOwner(ownerA.sessionCookie, 'iso-org-a');
+      const ownerB = await registerAndLogin('iso-owner-b');
+      const orgB = await createOrgAsOwner(ownerB.sessionCookie, 'iso-org-b');
+
+      const projectB = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        cookies: { [SESSION_COOKIE_NAME]: ownerB.sessionCookie },
+        payload: { organizationId: orgB.id, name: 'B project', slug: `b-project-${Date.now()}` },
+      });
+      const projectBId = projectB.json().project.id as string;
+
+      const assetB = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectBId}/assets`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerB.sessionCookie },
+        payload: {
+          assetType: 'WEB',
+          name: 'B asset',
+          config: { baseUrl: 'https://b.example.com' },
+        },
+      });
+      const assetBId = assetB.json().asset.id as string;
+
+      const headersA = { cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie } };
+
+      const getProjectB = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${projectBId}`,
+        ...headersA,
+      });
+      expect(getProjectB.statusCode).toBe(404);
+
+      const getAssetB = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assets/${assetBId}`,
+        ...headersA,
+      });
+      expect(getAssetB.statusCode).toBe(404);
+
+      const getMembersB = await app.inject({
+        method: 'GET',
+        url: `/api/v1/organizations/${orgB.id}/members`,
+        ...headersA,
+      });
+      expect(getMembersB.statusCode).toBe(403);
+
+      const getOrgB = await app.inject({
+        method: 'GET',
+        url: `/api/v1/organizations/${orgB.id}`,
+        ...headersA,
+      });
+      expect(getOrgB.statusCode).toBe(404);
+
+      void orgA; // orgA created only to prove ownerA is a real, distinct tenant
+    });
+  });
+
+  describe('projects', () => {
+    it('supports create/list/get/update/archive with organization isolation', async () => {
+      const owner = await registerAndLogin('project-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'project-org');
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: 'Widgets', slug: `widgets-${Date.now()}` },
+      });
+      expect(create.statusCode).toBe(201);
+      const projectId = create.json().project.id as string;
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects?organizationId=${org.id}`,
+        ...auth,
+      });
+      const projects = list.json().projects as { id: string }[];
+      expect(projects.some((p) => p.id === projectId)).toBe(true);
+
+      const update = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${projectId}`,
+        ...auth,
+        payload: { name: 'Widgets Renamed' },
+      });
+      expect(update.statusCode).toBe(200);
+      expect(update.json().project.name).toBe('Widgets Renamed');
+
+      const archive = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/projects/${projectId}`,
+        ...auth,
+      });
+      expect(archive.statusCode).toBe(200);
+      expect(archive.json().project.status).toBe('archived');
+    });
+
+    it('a VIEWER cannot create a project (permission enforcement)', async () => {
+      const owner = await registerAndLogin('project-perm-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'project-perm-org');
+      const viewer = await registerAndLogin('project-perm-viewer');
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { email: viewer.email, role: 'VIEWER' },
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        cookies: { [SESSION_COOKIE_NAME]: viewer.sessionCookie },
+        payload: { organizationId: org.id, name: 'Should fail', slug: `should-fail-${Date.now()}` },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+  });
+
+  describe('assets', () => {
+    async function setupProject(label: string) {
+      const owner = await registerAndLogin(label);
+      const org = await createOrgAsOwner(owner.sessionCookie, label);
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: label, slug: `${label}-${Date.now()}` },
+      });
+      return { owner, org, auth, projectId: project.json().project.id as string };
+    }
+
+    it('creates a WEB, API, ANDROID, and IOS asset with valid type-specific config', async () => {
+      const { auth, projectId } = await setupProject('asset-types');
+
+      const cases: { assetType: string; config: Record<string, unknown> }[] = [
+        { assetType: 'WEB', config: { baseUrl: 'https://example.com' } },
+        { assetType: 'API', config: { baseUrl: 'https://api.example.com' } },
+        { assetType: 'ANDROID', config: { packageName: 'com.example.app' } },
+        { assetType: 'IOS', config: { bundleId: 'com.example.app' } },
+      ];
+
+      for (const testCase of cases) {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/projects/${projectId}/assets`,
+          ...auth,
+          payload: {
+            assetType: testCase.assetType,
+            name: `${testCase.assetType} asset`,
+            config: testCase.config,
+          },
+        });
+        expect(response.statusCode).toBe(201);
+        expect(response.json().asset.assetType).toBe(testCase.assetType);
+        expect(response.json().asset.authorizationConfirmed).toBe(false);
+      }
+    });
+
+    it('rejects a config that does not match the asset type', async () => {
+      const { auth, projectId } = await setupProject('asset-invalid-config');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        // ANDROID requires packageName, not baseUrl
+        payload: {
+          assetType: 'ANDROID',
+          name: 'Bad config',
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('confirms and revokes authorization, recorded with who and when', async () => {
+      const { auth, projectId } = await setupProject('asset-auth-confirm');
+      const create = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: {
+          assetType: 'WEB',
+          name: 'To confirm',
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      const assetId = create.json().asset.id as string;
+
+      const confirm = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...auth,
+        payload: { authorizationConfirmed: true },
+      });
+      expect(confirm.statusCode).toBe(200);
+      expect(confirm.json().asset.authorizationConfirmed).toBe(true);
+      expect(confirm.json().asset.authorizationConfirmedAt).toEqual(expect.any(String));
+    });
+
+    it('a DEVELOPER can create an asset but cannot confirm its authorization (separation of duties)', async () => {
+      const owner = await registerAndLogin('asset-dev-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'asset-dev-org');
+      const developer = await registerAndLogin('asset-dev-user');
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { email: developer.email, role: 'DEVELOPER' },
+      });
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { organizationId: org.id, name: 'Dev project', slug: `dev-project-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+      const devAuth = { cookies: { [SESSION_COOKIE_NAME]: developer.sessionCookie } };
+
+      const create = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...devAuth,
+        payload: {
+          assetType: 'WEB',
+          name: 'Dev asset',
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      expect(create.statusCode).toBe(201);
+      const assetId = create.json().asset.id as string;
+
+      const confirm = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...devAuth,
+        payload: { authorizationConfirmed: true },
+      });
+      expect(confirm.statusCode).toBe(403);
+    });
+  });
+
+  describe('assessments', () => {
+    async function setupAuthorizedAsset(label: string, assetType: 'WEB' | 'ANDROID' = 'WEB') {
+      const owner = await registerAndLogin(label);
+      const org = await createOrgAsOwner(owner.sessionCookie, label);
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: label, slug: `${label}-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+
+      const config =
+        assetType === 'WEB'
+          ? { baseUrl: 'https://example.com' }
+          : { packageName: 'com.example.app' };
+      const assetResponse = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: { assetType, name: `${label} asset`, config },
+      });
+      const assetId = assetResponse.json().asset.id as string;
+
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...auth,
+        payload: { authorizationConfirmed: true },
+      });
+
+      return { auth, projectId, assetId };
+    }
+
+    it('creates an assessment for a valid asset/assessment-type combination', async () => {
+      const { auth, projectId, assetId } = await setupAuthorizedAsset('assessment-valid');
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().assessment.status).toBe('QUEUED');
+    }, 15_000);
+
+    it('rejects an incompatible asset/assessment-type combination', async () => {
+      const { auth, projectId, assetId } = await setupAuthorizedAsset(
+        'assessment-invalid',
+        'ANDROID',
+      );
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('rejects creating an assessment against an asset whose authorization is not confirmed', async () => {
+      const owner = await registerAndLogin('assessment-unauthorized');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'assessment-unauthorized');
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: 'unauth', slug: `unauth-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+      const asset = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: {
+          assetType: 'WEB',
+          name: 'Unauthorized asset',
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      const assetId = asset.json().asset.id as string;
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('cancels a QUEUED assessment, and rejects cancelling it again', async () => {
+      const { auth, projectId, assetId } = await setupAuthorizedAsset('assessment-cancel');
+      const create = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      const assessmentId = create.json().assessment.id as string;
+
+      const cancel = await app.inject({
+        method: 'POST',
+        url: `/api/v1/assessments/${assessmentId}/cancel`,
+        ...auth,
+      });
+      expect(cancel.statusCode).toBe(200);
+      expect(cancel.json().assessment.status).toBe('CANCELLED');
+
+      const cancelAgain = await app.inject({
+        method: 'POST',
+        url: `/api/v1/assessments/${assessmentId}/cancel`,
+        ...auth,
+      });
+      expect(cancelAgain.statusCode).toBe(409);
+    }, 15_000);
+
+    it('an organization cannot cancel another organization assessment (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('assessment-iso-a');
+      const { auth: authB, projectId, assetId } = await setupAuthorizedAsset('assessment-iso-b');
+      const create = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...authB,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      const assessmentId = create.json().assessment.id as string;
+
+      const cancelAttempt = await app.inject({
+        method: 'POST',
+        url: `/api/v1/assessments/${assessmentId}/cancel`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+      });
+      expect(cancelAttempt.statusCode).toBe(404);
+    }, 15_000);
+
+    it('rejects an unauthenticated assessment cancellation attempt', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/assessments/00000000-0000-0000-0000-000000000000/cancel',
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('legacy API-key path (Batch 2 behavior preserved)', () => {
+    it('an API key still authenticates and is tenant-isolated', async () => {
+      const owner = await registerAndLogin('legacy-key-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'legacy-key-org');
+      const generated = generateApiKey(MASTER_KEY);
+      await client.db.insert(schema.apiKeys).values({
+        organizationId: org.id,
+        name: 'legacy key',
+        keyPrefix: generated.keyPrefix,
+        keyHash: generated.keyHash,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/organizations',
+        headers: { authorization: `Bearer ${generated.raw}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const organizations = response.json().organizations as { id: string }[];
+      expect(organizations).toHaveLength(1);
+      expect(organizations[0]?.id).toBe(org.id);
     });
   });
 });

@@ -8,6 +8,13 @@
       "when": 1790048752277,
       "tag": "0000_windy_the_renegades",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790051297003,
+      "tag": "0001_regular_kate_bishop",
+      "breakpoints": true
     }
   ]
 }

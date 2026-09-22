@@ -2,26 +2,31 @@
 
 Application security assessment platform — monorepo.
 
-**Status:** Batch 2 (Identity, Tenancy, Authorization, Commercial Foundation & Audit) complete.
-Real scanning/assessment functionality has not been implemented yet — see
-[docs/security-model.md](docs/security-model.md) for the planned future model.
+**Status:** Batch 3 (Human Identity + Security Assessment Domain) complete. Human
+registration/login, organizations with automatic OWNER bootstrap, membership
+management, and the full Project → Asset → Assessment → AssessmentJob domain model
+are implemented. **No scanner, crawler, or outbound-target-request logic exists
+yet** — see [docs/security-model.md](docs/security-model.md) for what's implemented
+versus still future.
 
 ## Structure
 
 ```
 /apps
   web             React + Vite + TypeScript frontend (placeholder shell)
-  api             Fastify HTTP API — health/readiness, auth, organizations/projects/api-keys
+  api             Fastify HTTP API — auth, organizations/members, projects, assets, assessments, api-keys
   worker          BullMQ worker — assessment-orchestration/assessment-jobs consumers (placeholder processing)
   report-worker   BullMQ worker — report-generation consumer (placeholder processing)
 /packages
-  shared-types    Types shared across apps
+  shared-types    Domain enums/types shared across apps: AssetType, AssessmentType,
+                  AssessmentStatus, AssessmentJobStatus, compatibility/transition rules
   config          Zod-based env-var schema/config loader
   logger          Structured logging (pino), secret redaction
   db              Drizzle ORM schema, migrations, database client, audit service
   queue           BullMQ/Redis queue infrastructure
   auth            Authentication/authorization primitives: principals, roles,
-                  permissions, API-key crypto — no scanner/business logic
+                  permissions, password hashing (Argon2id), session tokens, API-key
+                  crypto — no scanner/business logic
   billing         Provider-agnostic billing domain: plan catalog, seat math,
                   BillingProvider interface (no live payment integration)
   scanner-core    ScannerPlugin interface, SafeHttpClient, orchestration primitives
@@ -31,10 +36,10 @@ Real scanning/assessment functionality has not been implemented yet — see
 /infrastructure
   docker          docker-compose.yml — local PostgreSQL + Redis
 /docs
-  architecture.md     System overview and package/app responsibilities
-  authorization.md    Platform vs. tenant identity, roles, permissions, API keys
+  architecture.md     System overview, domain model, package/app responsibilities
+  authorization.md    Platform vs. tenant identity, human + API-key auth, roles, permissions
   billing.md          Plans, subscriptions, seats, payments
-  security-model.md   The future assessment authorization/scope model
+  security-model.md   Asset authorization/assessment-compatibility model (implemented vs. future)
 ```
 
 ## Requirements

@@ -1,3 +1,24 @@
-// Placeholder package. Domain types (Asset, Assessment, Finding, etc.) are added
-// in a later implementation step, not as part of the monorepo scaffold.
-export const SHARED_TYPES_PACKAGE = '@aivoryx/shared-types';
+export { ASSET_TYPES, ASSET_STATUSES, ASSET_BUILD_PLATFORMS, isAssetType } from './assets.js';
+export type {
+  AssetType,
+  AssetStatus,
+  AssetBuildPlatform,
+  AssetConfig,
+  AssetConfigFor,
+  WebAssetConfig,
+  ApiAssetConfig,
+  AndroidAssetConfig,
+  IosAssetConfig,
+} from './assets.js';
+
+export {
+  ASSESSMENT_TYPES,
+  ASSESSMENT_STATUSES,
+  ASSESSMENT_JOB_STATUSES,
+  ASSET_TYPE_ASSESSMENT_COMPATIBILITY,
+  isAssessmentType,
+  isAssessmentTypeCompatibleWithAsset,
+  canTransitionAssessmentStatus,
+  canTransitionAssessmentJobStatus,
+} from './assessments.js';
+export type { AssessmentType, AssessmentStatus, AssessmentJobStatus } from './assessments.js';

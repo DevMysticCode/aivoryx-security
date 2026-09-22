@@ -14,6 +14,11 @@ export const PERMISSIONS = [
   'project:update',
   'project:delete',
 
+  'asset:read',
+  'asset:create',
+  'asset:update',
+  'asset:delete',
+
   'assessment:read',
   'assessment:create',
   'assessment:cancel',

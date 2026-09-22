@@ -46,4 +46,30 @@ export type {
   ApiKeyVerificationFailureReason,
 } from './api-key.js';
 
+export {
+  hashPassword,
+  verifyPassword,
+  validatePasswordStrength,
+  PASSWORD_MIN_LENGTH,
+} from './password.js';
+export type { PasswordValidationResult } from './password.js';
+
+export {
+  generateSessionToken,
+  hashSessionToken,
+  verifySessionToken,
+  verifySessionCredential,
+  SESSION_COOKIE_NAME,
+  SESSION_TTL_MS,
+} from './session.js';
+export type {
+  GeneratedSessionToken,
+  SessionRecordLike,
+  VerifySessionOptions,
+  VerifySessionResult,
+  SessionVerificationFailureReason,
+} from './session.js';
+
+export { normalizeEmail } from './email.js';
+
 export { AuthenticationError, AuthorizationError, TenantAccessError } from './errors.js';

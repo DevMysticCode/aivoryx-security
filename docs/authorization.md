@@ -14,119 +14,185 @@ users
 
 There is no "platform organization" — a platform administrator is never a member of a
 special tenant, and no seat/billing logic ever sees `platform_role`. Conversely,
-`organization_members` has no concept of platform access. This split is the schema-level
-enforcement of "platform administration is separate from tenant membership."
+`organization_members` has no concept of platform access.
 
-## The AuthPrincipal
+## Two authentication mechanisms
 
-Every authenticated request is normalized to one of two shapes
-(`packages/auth/src/principals.ts`):
+| Mechanism      | Who                                                     | Carries                                                              | Lifecycle                                              |
+| -------------- | ------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------ |
+| Session cookie | A logged-in human (`POST /auth/register`/`/auth/login`) | `request.userId` — the real user id                                  | httpOnly cookie, 7-day fixed expiry, revoked on logout |
+| API key        | A machine/CI credential (`POST /api-keys`)              | `request.principal` — a `TenantPrincipal` scoped to one organization | No expiry by default; revocable; optional `expires_at` |
 
-```ts
-type AuthPrincipal =
-  | { type: 'platform'; userId: string; role: PlatformRole }
-  | {
-      type: 'tenant';
-      userId: string;
-      organizationId: string;
-      role: OrganizationRole;
-      authType: 'user' | 'api-key';
-    };
+Both are populated by a single `onRequest` hook (`apps/api/src/auth/context.ts`) —
+**at most one applies per request** (an `Authorization` header takes precedence if
+somehow both are present). `/health` and `/ready` read neither and stay open.
+
+Every other route calls `requireAnyIdentity(request)` first (401 if neither
+mechanism produced an identity), then resolves the specific organization it needs
+access to via `resolveTenantPrincipalForOrganization`/
+`requireTenantPrincipalForOrganization` (`apps/api/src/auth/context.ts`):
+
+- If the request carries an API-key principal, it must match the target org exactly.
+- If the request carries a session `userId`, the resolver looks up that user's
+  `organization_members` row for the target org (must be `status: 'active'`) and
+  builds a `TenantPrincipal` with the user's **real role in that org** — a session
+  user's permissions are never fixed; they come from membership, so the same user
+  can be `OWNER` in one org and have no access at all to another.
+
+This is why routes with an id-in-URL org (e.g. `/organizations/:id/members`) and
+routes deriving org from a nested resource (e.g. `/assets/:id`, whose org comes from
+`asset -> project -> organization`) both work identically for session and API-key
+callers, without the route code caring which mechanism authenticated the request.
+
+## Human authentication (Part A)
+
+- **Registration** (`POST /auth/register`): validates password strength (≥12 chars,
+  at least one letter and one digit — `packages/auth/src/password.ts`), hashes with
+  Argon2id (`@node-rs/argon2`, prebuilt binaries, OWASP-recommended parameters),
+  rejects a duplicate email with 409, and returns a session cookie immediately (no
+  separate email-verification step in this batch — there is no email-delivery
+  infrastructure yet, so an account is active as soon as it's created).
+- **Login** (`POST /auth/login`): verifies the password, checks `status === 'active'`,
+  and — critically — **returns the identical generic `"Invalid email or password"`
+  message and 401 status for both "no such account" and "wrong password"**, running a
+  dummy Argon2 verification in the no-account case so the response time doesn't leak
+  which branch was taken either. This is the user-enumeration mitigation; see the
+  security review below.
+- **Logout** (`POST /auth/logout`): sets `sessions.revoked_at`, clears the cookie.
+  A revoked session's token hash still exists in the table (audit trail) but
+  `verifySessionCredential` treats any `revoked_at` as an immediate failure.
+- **Sessions**: an opaque, high-entropy random token (`packages/auth/src/session.ts`)
+  — hashed with a keyed HMAC (`CREDENTIAL_MASTER_KEY`), never stored raw, same
+  rationale as API keys (see below). Fixed 7-day expiry set at creation; no sliding
+  renewal in this batch (a reasonable future improvement, not required now).
+- **`GET /me`**: reflects whichever identity actually authenticated the request — a
+  user profile for a session, or the raw `AuthPrincipal` for an API key. There is no
+  fabricated "logged in as an API key user" profile.
+
+### Cookie attributes and CSRF
+
+The session cookie is `httpOnly`, `Secure` in production, `SameSite=Lax`, `Path=/`.
+`SameSite=Lax` is the CSRF mitigation for this batch: it is sent on top-level
+navigations but **not** on cross-site `fetch`/`XHR`/form-POST requests initiated by
+another origin, which covers the realistic CSRF threat against a JSON API consumed by
+this app's own frontend. A separate CSRF token was deliberately not added on top —
+that would be meaningful defense-in-depth for a future browser-form-based flow, but
+isn't required to close the CSRF gap for a cookie used only by same-origin `fetch`
+calls, and adding it now would be complexity without a corresponding threat closed.
+
+### Brute-force / rate limiting
+
+`@fastify/rate-limit` is registered globally (300 req/min per IP) with stricter
+per-route overrides: `POST /auth/register` (5/15min), `POST /auth/login` (10/15min),
+`POST /organizations` (20/15min). This bounds credential-guessing and account-creation
+abuse without needing a separate service.
+
+## Organization bootstrap (Part B)
+
+The Batch 2 gap — organization creation required an API key, but API keys require an
+existing organization — is fixed:
+
+```
+1. POST /auth/register           -> session cookie
+2. POST /organizations            -> org created; caller's session userId is
+                                      automatically added as OWNER (no separate step)
+3. POST /api-keys {organizationId} -> raw key returned once, from the session
+4. Authorization: Bearer <key>     -> programmatic access from here on
 ```
 
-Route/service code depends on this union, never on a raw session or API-key row shape.
-`hasPermission`/`requirePermission` only ever grant tenant permissions to a `'tenant'`
-principal, and `hasPlatformPermission`/`requirePlatformPermission` only to a
-`'platform'` principal — the two permission spaces cannot cross.
+`organizationsService.create` (`apps/api/src/services/organizations.ts`) only
+creates the OWNER membership when a real `userId` is present (session auth). An
+API-key-authenticated `POST /organizations` still works (any authenticated identity
+may create a new org — there's no tenant permission for "create an organization",
+since permissions apply _within_ an org that already exists) but creates no
+membership, because an API key isn't tied to a real user row — there's no one to
+make OWNER. This is an intentional, narrow limitation, not an oversight.
 
 ## Tenant isolation
 
-**A UUID is never authorization.** Every organization-scoped query in `apps/api`'s
-service layer filters by `principal.organizationId` — never by an id taken from the
-request path/body alone. For a request targeting a specific resource by id (e.g.
-`GET /projects/:projectId`), the service loads the row and then checks
-`row.organizationId === principal.organizationId`; on mismatch it returns `null`,
-which the route maps to **404**, not 403. This is deliberate: an org must not be able
-to distinguish "doesn't exist" from "belongs to someone else" for a resource it
-doesn't own (no existence leakage via status code).
+**A UUID is never authorization.** Every organization-scoped query filters by a
+resolved principal's `organizationId` — never by an id taken from the request alone.
+For a resource fetched by id (project/asset/assessment/api-key), the service loads
+the row, resolves tenant access against _its_ organization, and returns `null` on any
+mismatch — the route maps `null` to **404**, not 403, so "doesn't exist" and
+"belongs to someone else" are indistinguishable to an unauthorized caller.
 
-`packages/auth` also exports `assertTenantAccess`/`requireTenantPermission`, which throw
-`TenantAccessError` (403) instead. These are used where confirming existence is
-intentional rather than a leak (e.g. a future admin action against a known org id) —
-they are not used for the plain resource-by-id routes in this batch, on purpose.
+For routes where the organization id is client-asserted directly in the URL
+(`/organizations/:id/...`), a 403 (`TenantAccessError`) is used instead — the client
+already named that org, so confirming they can't access it leaks nothing new.
 
-This is enforced and tested end-to-end in `apps/api/src/api.integration.test.ts`
-(Tenant A can never read/list/delete Tenant B's projects, api keys, or organization)
-and at the query level in `packages/db/src/domain.integration.test.ts`.
+Enforced and tested end-to-end in `apps/api/src/api.integration.test.ts` for
+projects, assets, assessments, members, and organizations, and at the query level in
+`packages/db/src/domain.integration.test.ts`.
 
 ## Roles and permissions
 
-Permissions are plain strings (`packages/auth/src/permissions.ts`), e.g.
-`project:create`, `billing:manage`, `api_key:revoke`. The mapping from role to
-permission set is centralized in `packages/auth/src/role-permissions.ts`
-(`ROLE_PERMISSIONS`, `PLATFORM_ROLE_PERMISSIONS`) — route/service code never branches
-on `principal.role` directly; it always calls `hasPermission`/`requirePermission`.
+Permissions are plain strings (`packages/auth/src/permissions.ts`); the mapping from
+role to permission set is centralized in `packages/auth/src/role-permissions.ts` —
+route/service code never branches on `principal.role` directly, only on
+`hasPermission`/`requirePermission`.
 
-| Tenant role        | Can do                                                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `OWNER`            | Everything, including `billing:manage`.                                                                            |
-| `ADMIN`            | Organization/membership/project/API-key administration, `billing:read` — **not** `billing:manage`.                 |
-| `SECURITY_MANAGER` | Assessment/finding read+write, project read/update — no membership or billing administration.                      |
-| `DEVELOPER`        | Project read/create/update, assessment:read/create, finding:read — no membership, billing, or API-key permissions. |
-| `VIEWER`           | Read-only across organization/member/project/assessment/finding.                                                   |
+| Tenant role        | Notable grants                                                                                                                                                                                 |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OWNER`            | Everything, including `billing:manage` and `asset:delete`.                                                                                                                                     |
+| `ADMIN`            | Same as OWNER except `billing:manage` (read-only billing).                                                                                                                                     |
+| `SECURITY_MANAGER` | Full asset lifecycle including `asset:update` (confirms authorization) and `asset:create`, plus all assessment/finding permissions — **not** `asset:delete`, membership, or billing.           |
+| `DEVELOPER`        | `project:*` (except delete), `asset:read`/`asset:create` — **not** `asset:update` (cannot confirm authorization — separation of duties, see below), no membership/billing/API-key permissions. |
+| `VIEWER`           | Read-only everywhere.                                                                                                                                                                          |
 
-| Platform role | Can do                                                               |
-| ------------- | -------------------------------------------------------------------- |
-| `SUPER_ADMIN` | Every platform permission.                                           |
-| `SUPPORT`     | Read-only: organizations, users, audit log. No billing, no mutation. |
-| `BILLING`     | Organization read + billing read/manage. No user management.         |
-| `OPERATIONS`  | System operate + audit read. No billing, no user management.         |
+### Separation of duties on authorization confirmation
 
-No platform role except `SUPER_ADMIN` has unrestricted access — see
-`packages/auth/src/role-permissions.test.ts` for the enforced invariants.
+`asset:update` is the permission gating `authorizationConfirmed` (see
+[security-model.md](security-model.md)) as well as ordinary edits. DEVELOPER
+deliberately lacks it: a developer can _add_ an asset for testing, but confirming
+that the organization is actually authorized to have it assessed is a
+SECURITY_MANAGER/ADMIN/OWNER decision. This is enforced (not just documented) — see
+`packages/auth/src/role-permissions.test.ts` and the integration test "a DEVELOPER
+can create an asset but cannot confirm its authorization".
+
+### Membership safety: an organization can never become ownerless
+
+`membersService.updateRole`/`.remove` (`apps/api/src/services/members.ts`) both
+refuse the operation (400) if it would drop the organization's active-OWNER count to
+zero. This isn't explicitly required by role/permission checks alone — it's a
+business-rule guard layered on top, because OWNER is the only role that can restore
+another OWNER, so losing the last one would permanently lock the organization out of
+billing/ownership administration.
+
+## Membership / invitations (Part C)
+
+`POST /organizations/:id/members` requires the target email to already belong to a
+**registered** user — it adds them directly with `status: 'active'`. There is no
+email-delivery infrastructure in this batch, so the full flow (invite an
+unregistered email, they receive a link, they complete signup, membership activates)
+is deferred; the `membership_status` enum's `'invited'` value remains in the schema
+for that future flow, and the service/route layering (`add`/`updateRole`/`remove`
+each independently authorized and audited) needs no redesign to add it — only a new
+"pending invitation" record type and an email sender.
 
 ## API keys
 
-Flow (`packages/auth/src/api-key.ts`):
+Unchanged from Batch 2 (`packages/auth/src/api-key.ts`): keyed-HMAC hash (not a slow
+KDF — the secret is high-entropy random data, not a human password), raw secret
+returned exactly once at creation, revocation checked before hash comparison,
+`API_KEY_DEFAULT_ROLE = 'ADMIN'` (every key gets the same fixed role — no per-key
+scopes yet). Now reachable from a session (Part B's bootstrap flow) in addition to
+the original machine-only path.
 
-```
-Authorization header
-   → parseApiKeyHeader()          extract {keyPrefix, secret}, tolerant of "Bearer " prefix
-   → findByPrefix(keyPrefix)      caller-supplied DB lookup (apps/api queries api_keys)
-   → verify status != revoked, not expired
-   → verifyApiKeySecret()         HMAC-SHA256(secret, key=CREDENTIAL_MASTER_KEY), constant-time compare
-   → construct TenantPrincipal    authType: 'api-key'
-```
+## Which endpoints accept which auth mechanism (Part K)
 
-- The raw secret is generated once (`generateApiKey`), returned to the caller in the
-  `POST /api/v1/api-keys` response body, and **never persisted** — only `key_hash`
-  (the HMAC) and `key_prefix` (a safe, non-secret lookup identifier) are stored.
-- Hashing uses a keyed HMAC, not plain SHA-256: the secret is high-entropy random data
-  (not a human password), so a slow KDF (bcrypt/argon2) would only add latency; the
-  `CREDENTIAL_MASTER_KEY` keying means a leaked `key_hash` column alone cannot be
-  brute-forced offline.
-- Revocation sets `status = 'revoked'` (checked before the hash comparison even runs).
-  Expiry is checked against `expires_at`; there is no separate stored "expired" status —
-  it's derived at verification time.
-- API keys belong to an **organization**, not a specific user (`api_keys` has no
-  owning-user column). Because this batch has no per-key permission scopes yet, every
-  API-key principal is granted a single fixed role, `API_KEY_DEFAULT_ROLE = 'ADMIN'`
-  (everything except `billing:manage`) — broad enough to be useful for CI/automation
-  (including managing the organization's own keys) while still excluding billing.
-  Per-key scopes are deferred to a future batch.
+| Endpoint                                       | Session                          | API key      |
+| ---------------------------------------------- | -------------------------------- | ------------ |
+| `GET /health`, `GET /ready`                    | n/a (public)                     | n/a (public) |
+| `POST /auth/register`, `/login`, `/logout`     | n/a (these _create_ the session) | n/a          |
+| `GET /me`                                      | ✅                               | ✅           |
+| `GET`/`POST /organizations`                    | ✅                               | ✅           |
+| `GET /organizations/:id`, `/members*`          | ✅                               | ✅           |
+| `GET`/`POST`/`PATCH`/`DELETE /projects*`       | ✅                               | ✅           |
+| `GET`/`POST`/`PATCH /assets*`                  | ✅                               | ✅           |
+| `GET`/`POST /assessments*`, `/cancel`          | ✅                               | ✅           |
+| `GET`/`POST /api-keys`, `DELETE /api-keys/:id` | ✅                               | ✅           |
 
-## What this batch does _not_ implement (and why)
-
-There is no real user login (password, OAuth, magic link, session) in this batch —
-**API-key authentication is the only real authentication mechanism.** This has two
-concrete, intentional consequences documented here rather than papered over:
-
-- **`GET /api/v1/me`** returns whichever principal actually authenticated the request
-  (currently always an API-key tenant principal) rather than a human user profile
-  (name/email/avatar) — there is no session to back that with yet.
-- **`POST /api/v1/organizations`** (creating a brand-new tenant) accepts any
-  authenticated principal and does **not** create an initial `OWNER` membership,
-  because API-key principals aren't tied to a real user and there's no logged-in human
-  to assign as owner. A real signup flow wires this up once user authentication exists.
-
-Both are explicit, tested behaviors — not stubs pretending to be complete.
+Every organization-scoped route accepts both mechanisms uniformly (Part K: "do not
+remove or weaken API-key authentication") — the dual-resolution design above is what
+makes that possible without duplicating route logic per auth type.

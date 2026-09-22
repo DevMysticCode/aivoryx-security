@@ -1,85 +1,106 @@
-# Security model for future assessments
+# Security model for assessments
 
-**No scanner, crawler, or assessment-execution logic exists yet.** This document
-describes the authorization/scope model that will govern that functionality once it
-is built, so it's designed in before any code that could act on it exists.
+**Still no scanner, crawler, or outbound-target-request logic exists.** Batch 3
+implements the _authorization and domain-model_ half of this document (Asset,
+Authorization confirmation, Assessment, compatibility validation) — the sections
+below are marked with what's real today versus what remains future work.
 
 ## The model
 
 ```
 Project
   ↓
-Targets              what could be scanned (a URL, a host, an API spec, a mobile build)
+Asset                 what could be assessed (WEB | API | ANDROID | IOS)              ✅ implemented (Batch 3)
   ↓
-Authorization         explicit, recorded proof the organization is allowed to test it
+Authorization          explicit, recorded confirmation the org is allowed to test it   ✅ implemented (Batch 3)
   ↓
-Scope                 exactly what is in-bounds (hosts, paths, ports)
+Scope / Exclusions      exactly what is in-bounds vs. explicitly out-of-bounds         ❌ future — see below
   ↓
-Exclusions             what is explicitly out-of-bounds even if in scope
+Assessment               a scheduled/queued run against an authorized asset            ✅ implemented (Batch 3, lifecycle only)
   ↓
-Assessment              a scheduled/executed run against an authorized, scoped target
-  ↓
-Scanner                 the thing that actually makes requests
+Scanner                  the thing that actually makes requests                        ❌ not built; not even started
 ```
 
 Each stage is a hard gate on the one below it, not a formality:
 
-- **A target existing is not authorization to scan it.** Adding a target to a project
-  records _what it is_; it grants no scanning rights by itself.
-- **Authorization must be explicit and recorded**, not inferred from "the user typed a
-  URL into a form." A future `targets`/`target_authorizations`-shaped table records who
-  authorized a target, when, and (eventually) how that was verified — mirroring how
-  `organization_members`/`api_keys` in this batch already require an explicit row to
-  exist before access is granted; there is no implicit trust anywhere in this codebase,
-  and there won't be for scan targets either.
-- **Scope is a positive allow-list** (specific hosts/paths/ports), not "anything under
-  this domain." A scanner must refuse to act outside the recorded scope even if a
-  discovered link or redirect points elsewhere.
-- **Exclusions override scope.** An organization must be able to carve out paths/hosts
-  that are in-scope generally but must never be touched (e.g. a fragile legacy
-  subsystem, a third-party-owned subdomain that happens to resolve under the same
-  parent domain).
-- **An assessment is scoped to one authorized target set at execution time** — not to
-  "whatever the project currently contains," so scope changes after an assessment
-  starts don't silently widen what's being tested mid-run.
-- **The scanner is the last, most restricted link in the chain.** It receives an
-  already-authorized, already-scoped assessment and must have no independent path to
-  reach anything else — see the worker/network isolation boundary below.
+- **An asset existing is not authorization to assess it.** `assets.authorization_confirmed`
+  defaults to `false`; adding an asset to a project records _what it is_, nothing more.
+- **Authorization must be explicit and recorded** — `PATCH /assets/:id
+{authorizationConfirmed: true}` records `authorization_confirmed_by` (the real user
+  id, when session-authenticated) and `authorization_confirmed_at`, and is gated
+  behind `asset:update`, deliberately withheld from the DEVELOPER role (see
+  [authorization.md](authorization.md)'s separation-of-duties note) — the person who
+  adds an asset for testing is not automatically trusted to attest the organization
+  is authorized to have it assessed.
+- **The API enforces this before an assessment can even be created**:
+  `apps/api/src/services/assessments.ts`'s `create()` throws a 400 `DomainError`
+  ("This asset does not have authorization confirmed for assessment") if
+  `authorizationConfirmed !== true` — checked server-side, not just documented.
+- **Asset type constrains assessment type** (`packages/shared-types`'s
+  `ASSET_TYPE_ASSESSMENT_COMPATIBILITY`): `ANDROID + WEB` is rejected with 400 before
+  any row is written. This is Part F's compatibility requirement — implemented and
+  tested (`packages/shared-types/src/assessments.test.ts`,
+  `apps/api/src/api.integration.test.ts`).
+- **Scope is a positive allow-list** (specific hosts/paths/ports) and **exclusions
+  override scope** — **not implemented yet.** Today, "authorized" is a single
+  organization-level boolean per asset; it is not yet host/path/port-granular. A
+  scanner must never be built to interpret `authorizationConfirmed: true` as "assess
+  anything reachable from this asset's config" without that finer-grained scope model
+  landing first — see the warning below.
+- **An assessment is scoped to one asset at creation time** (`assessments.asset_id`,
+  immutable) — not "whatever the project currently contains."
+- **The scanner is the last, most restricted link in the chain** — not built yet, so
+  this is still a forward-looking constraint, not an implemented one.
 
-## What this guarantees will never happen
+## What this guarantees will never happen (once a scanner exists)
 
-A future scanner must never be able to attack an arbitrary internet target just
-because a user (or a compromised API key) supplied a URL somewhere. Concretely, this
-rules out:
+A scanner must never be able to attack an arbitrary internet target just because a
+user (or a compromised API key) supplied a URL somewhere. Concretely, this rules out:
 
-- Treating "a project has a target row" as sufficient to scan it.
-- Treating "the user who added the target" as automatically authorized, without an
-  explicit authorization step recorded.
-- Following redirects or discovered links outside the recorded scope.
-- Letting a scan target's own responses expand what the scanner is allowed to touch
-  next (e.g. a redirect to an internal/private address — this is the SSRF class of
-  bug the eventual scanner worker must defend against, on top of scope/authorization).
+- Treating "an asset row exists" as sufficient to assess it — `authorizationConfirmed`
+  must be `true`, checked server-side (implemented).
+- Treating "the user who added the asset" as automatically authorized to confirm it —
+  separation of duties via `asset:update` (implemented).
+- Assessing an asset type with an incompatible assessment type — rejected by
+  `isAssessmentTypeCompatibleWithAsset` (implemented).
+- **Still to design before a scanner is built:** following redirects or discovered
+  endpoints outside a recorded scope; letting a target's own responses expand what's
+  reachable next (the SSRF class of bug); host/path/port-level scope and exclusions
+  finer than today's single per-asset boolean.
 - Any code path that lets a scanner reach a target the _organization that owns the
-  project_ has not explicitly authorized — the same tenant-isolation principle
-  enforced today for projects/api-keys/organizations (see
-  [authorization.md](authorization.md)) extends to targets and assessments once they
-  exist: a target authorized by Organization A is never reachable by Organization B's
-  assessments, and an assessment can never execute outside its own recorded scope.
+  project_ has not authorized — the same tenant-isolation principle already enforced
+  for projects/assets/assessments/api-keys (see [authorization.md](authorization.md))
+  extends to whatever scope model lands: an asset authorized by Organization A must
+  never be reachable by Organization B's assessments.
 
-## Relationship to today's tenant isolation
+## Assessment lifecycle (implemented, Part H)
 
-This is the same trust boundary Batch 2 already enforces for projects, API keys, and
-organizations (never accessible by id alone; always checked against
-`principal.organizationId`) — the assessment authorization/scope model is that same
-principle applied one layer deeper, to the specific hosts/paths a project's targets
-are allowed to touch. Building the scanner without this model already decided would
-risk shipping the SSRF/arbitrary-target-attack exposure the rest of this document
-exists to prevent; that's why it's written down now, before the code.
+```
+QUEUED ──► RUNNING ──► COMPLETED
+  │           │
+  │           └────► FAILED
+  └────────────────► CANCELLED
+```
+
+`packages/shared-types`'s `canTransitionAssessmentStatus`/`canTransitionAssessmentJobStatus`
+enforce this — terminal states never transition further. Only `QUEUED → CANCELLED` is
+reachable via the API today (`POST /assessments/:id/cancel`); `RUNNING`/`COMPLETED`/
+`FAILED` are reserved for the future worker that actually executes an assessment — the
+API has no route that lets a client set an arbitrary status.
+
+## Assessment → AssessmentJob → BullMQ pipeline (implemented, Part I)
+
+`POST /projects/:projectId/assessments` creates the `assessments` row, an
+`assessment_jobs` row, and enqueues a job on the existing `assessment-jobs` BullMQ
+queue (`packages/queue`, unchanged since Batch 1) with the job row's id so a future
+worker can correlate/resume/retry. **The worker that consumes it still only logs and
+acknowledges** (Batch 1 behavior, untouched) — no scanner executes, no outbound
+request is made. If enqueueing fails, both rows are marked `FAILED` rather than left
+in a QUEUED-but-never-actually-queued state.
 
 ## Explicitly out of scope for this document
 
-This document describes the _authorization and scope model_ — not the scanner
-implementation, not SSRF-prevention mechanics (DNS pinning, private-range blocking,
-timeout/resource limits), not the finding/evidence data model. Those are covered by
-the earlier architecture proposal's security-boundaries section and will be
-elaborated when the scanner is actually built.
+Not the scanner implementation itself, not SSRF-prevention mechanics (DNS pinning,
+private-range blocking, timeout/resource limits), not the finding/evidence data
+model, not host/path/port-level scope and exclusions. Those remain future batches;
+this document is updated as each piece actually lands, not written once and left stale.

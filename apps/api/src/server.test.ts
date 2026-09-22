@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type { Queue } from 'bullmq';
 import { createLogger } from '@aivoryx/logger';
 import type { AuditService, schema } from '@aivoryx/db';
+import type { AssessmentJobData } from '@aivoryx/queue';
 import { buildServer, type HealthCheckResult, type ServerDependencies } from './server.js';
 
 function healthy(): Promise<HealthCheckResult> {
@@ -24,11 +26,16 @@ function testLogger() {
  * isolation behavior is covered by the gated integration suite in
  * api.integration.test.ts against a real database.
  */
-function baseDeps(): Pick<ServerDependencies, 'db' | 'credentialMasterKey' | 'audit'> {
+function baseDeps(): Pick<
+  ServerDependencies,
+  'db' | 'credentialMasterKey' | 'audit' | 'assessmentJobsQueue' | 'isProduction'
+> {
   return {
     db: {} as unknown as PostgresJsDatabase<typeof schema>,
     credentialMasterKey: 'test-master-key-not-for-production-use-000000',
     audit: { record: async () => undefined } as AuditService,
+    assessmentJobsQueue: {} as unknown as Queue<AssessmentJobData>,
+    isProduction: false,
   };
 }
 

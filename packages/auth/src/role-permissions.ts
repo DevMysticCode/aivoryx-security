@@ -21,6 +21,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'project:create',
     'project:update',
     'project:delete',
+    'asset:read',
+    'asset:create',
+    'asset:update',
+    'asset:delete',
     'assessment:read',
     'assessment:create',
     'assessment:cancel',
@@ -43,6 +47,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'project:create',
     'project:update',
     'project:delete',
+    'asset:read',
+    'asset:create',
+    'asset:update',
+    'asset:delete',
     'assessment:read',
     'assessment:create',
     'assessment:cancel',
@@ -59,6 +67,11 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'member:read',
     'project:read',
     'project:update',
+    // Asset onboarding and authorization confirmation are core security-ops
+    // work, but asset:delete stays an administrative (OWNER/ADMIN) action.
+    'asset:read',
+    'asset:create',
+    'asset:update',
     'assessment:read',
     'assessment:create',
     'assessment:cancel',
@@ -70,11 +83,23 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'project:read',
     'project:create',
     'project:update',
+    // Developer can add an asset but not confirm its authorization or edit its
+    // config afterward — separation of duties: the security-authorization gate
+    // stays with SECURITY_MANAGER/ADMIN/OWNER (see asset:update above).
+    'asset:read',
+    'asset:create',
     'assessment:read',
     'assessment:create',
     'finding:read',
   ],
-  VIEWER: ['organization:read', 'member:read', 'project:read', 'assessment:read', 'finding:read'],
+  VIEWER: [
+    'organization:read',
+    'member:read',
+    'project:read',
+    'asset:read',
+    'assessment:read',
+    'finding:read',
+  ],
 };
 
 /**

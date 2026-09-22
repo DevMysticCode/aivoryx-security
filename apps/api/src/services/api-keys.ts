@@ -1,7 +1,12 @@
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { schema, type AuditService } from '@aivoryx/db';
-import { generateApiKey, requirePermission, type TenantPrincipal } from '@aivoryx/auth';
+import { generateApiKey, requirePermission } from '@aivoryx/auth';
+import {
+  requireTenantPrincipalForOrganization,
+  resolveTenantPrincipalForOrganization,
+  type RequestIdentity,
+} from '../auth/context.js';
 import type { RequestContext } from './organizations.js';
 
 export interface ApiKeysServiceDeps {
@@ -18,6 +23,7 @@ export interface CreateApiKeyInput {
 // Columns safe to return from list/revoke — the hash is never selected at all.
 const SAFE_API_KEY_COLUMNS = {
   id: schema.apiKeys.id,
+  organizationId: schema.apiKeys.organizationId,
   name: schema.apiKeys.name,
   keyPrefix: schema.apiKeys.keyPrefix,
   status: schema.apiKeys.status,
@@ -29,23 +35,43 @@ const SAFE_API_KEY_COLUMNS = {
 
 export function createApiKeysService(deps: ApiKeysServiceDeps) {
   return {
-    async list(principal: TenantPrincipal) {
+    /** Lists the API keys for `organizationId` — supports both API-key and session (browser) auth. */
+    async list(identity: RequestIdentity, organizationId: string) {
+      const principal = await requireTenantPrincipalForOrganization(
+        identity,
+        organizationId,
+        deps.db,
+      );
       requirePermission(principal, 'api_key:read');
       return deps.db
         .select(SAFE_API_KEY_COLUMNS)
         .from(schema.apiKeys)
-        .where(eq(schema.apiKeys.organizationId, principal.organizationId));
+        .where(eq(schema.apiKeys.organizationId, organizationId));
     },
 
-    /** Returns the raw secret exactly once, alongside the persisted (safe) fields. */
-    async create(principal: TenantPrincipal, input: CreateApiKeyInput, context: RequestContext) {
+    /**
+     * Creates a key for `organizationId` and returns the raw secret exactly
+     * once. This is the route a session-authenticated OWNER uses to bootstrap
+     * their first programmatic credential (see docs/authorization.md, Part B).
+     */
+    async create(
+      identity: RequestIdentity,
+      organizationId: string,
+      input: CreateApiKeyInput,
+      context: RequestContext,
+    ) {
+      const principal = await requireTenantPrincipalForOrganization(
+        identity,
+        organizationId,
+        deps.db,
+      );
       requirePermission(principal, 'api_key:create');
 
       const generated = generateApiKey(deps.credentialMasterKey);
       const [row] = await deps.db
         .insert(schema.apiKeys)
         .values({
-          organizationId: principal.organizationId,
+          organizationId,
           name: input.name,
           keyPrefix: generated.keyPrefix,
           keyHash: generated.keyHash,
@@ -55,7 +81,7 @@ export function createApiKeysService(deps: ApiKeysServiceDeps) {
       if (!row) throw new Error('Failed to create API key');
 
       await deps.audit.record({
-        organizationId: principal.organizationId,
+        organizationId,
         actorUserId: principal.authType === 'user' ? principal.userId : null,
         action: 'api_key.created',
         resourceType: 'api_key',
@@ -69,10 +95,8 @@ export function createApiKeysService(deps: ApiKeysServiceDeps) {
       return { ...row, rawKey: generated.raw };
     },
 
-    /** Returns null both when the key does not exist and when it belongs to another organization. */
-    async revoke(principal: TenantPrincipal, apiKeyId: string, context: RequestContext) {
-      requirePermission(principal, 'api_key:revoke');
-
+    /** Returns null both when the key does not exist and when the caller has no access to its organization. */
+    async revoke(identity: RequestIdentity, apiKeyId: string, context: RequestContext) {
       const [existing] = await deps.db
         .select({
           id: schema.apiKeys.id,
@@ -82,10 +106,15 @@ export function createApiKeysService(deps: ApiKeysServiceDeps) {
         .from(schema.apiKeys)
         .where(eq(schema.apiKeys.id, apiKeyId))
         .limit(1);
+      if (!existing) return null;
 
-      if (!existing || existing.organizationId !== principal.organizationId) {
-        return null;
-      }
+      const principal = await resolveTenantPrincipalForOrganization(
+        identity,
+        existing.organizationId,
+        deps.db,
+      );
+      if (!principal) return null;
+      requirePermission(principal, 'api_key:revoke');
 
       const [updated] = await deps.db
         .update(schema.apiKeys)
@@ -94,7 +123,7 @@ export function createApiKeysService(deps: ApiKeysServiceDeps) {
         .returning(SAFE_API_KEY_COLUMNS);
 
       await deps.audit.record({
-        organizationId: principal.organizationId,
+        organizationId: existing.organizationId,
         actorUserId: principal.authType === 'user' ? principal.userId : null,
         action: 'api_key.revoked',
         resourceType: 'api_key',

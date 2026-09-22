@@ -1,7 +1,7 @@
 import { getConfig } from '@aivoryx/config';
 import { createLogger } from '@aivoryx/logger';
 import { createDbClient, createAuditService } from '@aivoryx/db';
-import { createRedisConnection, checkRedisHealth } from '@aivoryx/queue';
+import { createRedisConnection, checkRedisHealth, createQueue, QUEUE_NAMES } from '@aivoryx/queue';
 import { buildServer } from './server.js';
 import { createShutdownHandler } from './shutdown.js';
 
@@ -11,6 +11,7 @@ async function main(): Promise<void> {
 
   const dbClient = createDbClient(config.database.url);
   const redisConnection = createRedisConnection(config.redis.url);
+  const assessmentJobsQueue = createQueue(QUEUE_NAMES.ASSESSMENT_JOBS, redisConnection);
   const audit = createAuditService(dbClient.db, {
     onError: (error) => logger.error({ err: error }, 'failed to record audit event'),
   });
@@ -22,10 +23,13 @@ async function main(): Promise<void> {
     db: dbClient.db,
     credentialMasterKey: config.security.credentialMasterKey,
     audit,
+    assessmentJobsQueue,
+    isProduction: config.isProduction,
   });
 
   const shutdown = createShutdownHandler(logger, async () => {
     await app.close();
+    await assessmentJobsQueue.close();
     await dbClient.close();
     await redisConnection.quit();
   });

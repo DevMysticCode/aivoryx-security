@@ -71,11 +71,20 @@ assertSeatAvailable(input): void   // throws SeatLimitExceededError at the limit
   entirely outside that table. Proven in
   `packages/db/src/domain.integration.test.ts` ("a platform-role user never consumes
   a tenant seat").
-- Nothing in this batch silently allows unlimited members — `assertSeatAvailable`
-  always throws once `usedSeats >= seatLimit`. Wiring this into an actual
-  "invite/add member" HTTP endpoint is deferred (no member-management route exists
-  yet in Batch 2's minimal API surface); the enforcement primitive itself is
-  implemented and unit-tested now so that endpoint has nothing left to invent later.
+- Nothing about the seat-math primitive itself silently allows unlimited members —
+  `assertSeatAvailable` always throws once `usedSeats >= seatLimit`.
+- **Known limitation (Batch 3):** `POST /organizations/:id/members` (added in Batch 3
+  — see [authorization.md](authorization.md)) does **not** call `assertSeatAvailable`
+  yet. Organizations have no subscription created by default (org creation only
+  inserts an `organizations` row), so there is no `seat_limit` to enforce against for
+  a newly bootstrapped organization; wiring real seat enforcement requires either a
+  default subscription at org-creation time or an explicit "no subscription = no seat
+  limit" policy decision, both of which are billing-functionality expansions
+  explicitly out of scope for Batch 3 (Part P). The enforcement primitive is
+  implemented and unit-tested (`packages/billing/src/subscription.test.ts`) and
+  proven against real membership data at the query level
+  (`packages/db/src/domain.integration.test.ts`'s seat-accounting test) so wiring it
+  into the member-add route is a small, well-defined follow-up, not new design work.
 
 ## Usage aggregation
 

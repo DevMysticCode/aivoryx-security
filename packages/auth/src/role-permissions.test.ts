@@ -34,6 +34,17 @@ describe('ROLE_PERMISSIONS', () => {
     expect(ROLE_PERMISSIONS.DEVELOPER).not.toContain('billing:manage');
   });
 
+  it('DEVELOPER can create an asset but not confirm its authorization (separation of duties)', () => {
+    expect(ROLE_PERMISSIONS.DEVELOPER).toContain('asset:create');
+    expect(ROLE_PERMISSIONS.DEVELOPER).not.toContain('asset:update');
+    expect(ROLE_PERMISSIONS.DEVELOPER).not.toContain('asset:delete');
+  });
+
+  it('SECURITY_MANAGER can confirm asset authorization but not delete an asset', () => {
+    expect(ROLE_PERMISSIONS.SECURITY_MANAGER).toContain('asset:update');
+    expect(ROLE_PERMISSIONS.SECURITY_MANAGER).not.toContain('asset:delete');
+  });
+
   it('VIEWER has only read permissions', () => {
     for (const permission of ROLE_PERMISSIONS.VIEWER) {
       expect(permission.endsWith(':read')).toBe(true);

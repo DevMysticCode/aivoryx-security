@@ -1,26 +1,31 @@
 import { randomUUID } from 'node:crypto';
-import Fastify, {
-  type FastifyInstance,
-  type FastifyBaseLogger,
-  type FastifyError,
-  type FastifyRequest,
-} from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyBaseLogger, type FastifyError } from 'fastify';
 import helmet from '@fastify/helmet';
-import { z } from 'zod';
+import cookie from '@fastify/cookie';
+import rateLimit from '@fastify/rate-limit';
+import type { Queue } from 'bullmq';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Logger } from '@aivoryx/logger';
 import { schema, type AuditService } from '@aivoryx/db';
-import { requireTenant } from '@aivoryx/auth';
-import { registerAuthContext, requireAuthenticated } from './auth/context.js';
-import { createOrganizationsService, type RequestContext } from './services/organizations.js';
+import type { AssessmentJobData } from '@aivoryx/queue';
+import { registerAuthContext } from './auth/context.js';
+import { errorEnvelope } from './http.js';
+import { createAuthService } from './services/auth.js';
+import { createOrganizationsService } from './services/organizations.js';
+import { createMembersService } from './services/members.js';
 import { createProjectsService } from './services/projects.js';
+import { createAssetsService } from './services/assets.js';
+import { createAssessmentsService } from './services/assessments.js';
 import { createApiKeysService } from './services/api-keys.js';
+import { registerHealthRoutes, type HealthCheckResult } from './routes/health.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { registerOrganizationRoutes } from './routes/organizations.js';
+import { registerProjectRoutes } from './routes/projects.js';
+import { registerAssetRoutes } from './routes/assets.js';
+import { registerAssessmentRoutes } from './routes/assessments.js';
+import { registerApiKeyRoutes } from './routes/api-keys.js';
 
-export interface HealthCheckResult {
-  healthy: boolean;
-  latencyMs?: number;
-  error?: string;
-}
+export type { HealthCheckResult } from './routes/health.js';
 
 export interface ServerDependencies {
   logger: Logger;
@@ -29,73 +34,19 @@ export interface ServerDependencies {
   db: PostgresJsDatabase<typeof schema>;
   credentialMasterKey: string;
   audit: AuditService;
-}
-
-interface ErrorEnvelope {
-  error: {
-    message: string;
-    statusCode: number;
-    requestId: string;
-  };
-}
-
-function errorEnvelope(statusCode: number, message: string, requestId: string): ErrorEnvelope {
-  return { error: { message, statusCode, requestId } };
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === '23505'
-  );
-}
-
-function requestContext(request: FastifyRequest): RequestContext {
-  const userAgent = request.headers['user-agent'];
-  return { ipAddress: request.ip, userAgent };
-}
-
-const createOrganizationBodySchema = z.object({
-  name: z.string().trim().min(1).max(200),
-  slug: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100)
-    .regex(/^[a-z0-9][a-z0-9-]*$/, 'slug must be lowercase alphanumeric with optional hyphens'),
-});
-
-const createProjectBodySchema = z.object({
-  name: z.string().trim().min(1).max(200),
-  slug: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100)
-    .regex(/^[a-z0-9][a-z0-9-]*$/, 'slug must be lowercase alphanumeric with optional hyphens'),
-  description: z.string().max(2_000).optional(),
-});
-
-const createApiKeyBodySchema = z.object({
-  name: z.string().trim().min(1).max(200),
-  expiresAt: z.string().datetime().optional(),
-});
-
-function badRequest(
-  reply: { status: (code: number) => { send: (body: unknown) => unknown } },
-  requestId: string,
-  issues: z.ZodIssue[],
-) {
-  const message = issues.map((issue) => issue.message).join('; ');
-  return reply.status(400).send(errorEnvelope(400, message || 'Invalid request body', requestId));
+  assessmentJobsQueue: Queue<AssessmentJobData>;
+  isProduction: boolean;
 }
 
 /**
  * Builds a fully configured Fastify instance without starting an HTTP listener,
  * so it can be exercised in tests via `app.inject()` and reused by the real
  * entrypoint (index.ts), which additionally calls `app.listen()`.
+ *
+ * Authentication: every route except /health and /ready supports both a
+ * session cookie (browser/human users) and an `Authorization: Bearer <api key>`
+ * header (programmatic access) — see docs/authorization.md for exactly which
+ * mechanism each route accepts and why.
  */
 export function buildServer(deps: ServerDependencies): FastifyInstance {
   const app = Fastify({
@@ -111,6 +62,12 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
   });
 
   void app.register(helmet);
+  void app.register(cookie);
+  void app.register(rateLimit, {
+    global: true,
+    max: 300,
+    timeWindow: '1 minute',
+  });
 
   registerAuthContext(app, { db: deps.db, credentialMasterKey: deps.credentialMasterKey });
 
@@ -126,139 +83,37 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
     reply.status(404).send(errorEnvelope(404, 'Not found', request.id));
   });
 
-  // --- Public, unauthenticated ---------------------------------------------
-
-  app.get('/api/v1/health', async () => ({
-    status: 'ok',
-    uptimeSeconds: Math.round(process.uptime()),
-    timestamp: new Date().toISOString(),
-  }));
-
-  app.get('/api/v1/ready', async (_request, reply) => {
-    const [database, redis] = await Promise.all([
-      deps.checkDatabaseHealth(),
-      deps.checkRedisHealth(),
-    ]);
-    const healthy = database.healthy && redis.healthy;
-
-    reply.status(healthy ? 200 : 503);
-    return {
-      status: healthy ? 'ready' : 'not_ready',
-      checks: { database, redis },
-      timestamp: new Date().toISOString(),
-    };
+  registerHealthRoutes(app, {
+    checkDatabaseHealth: deps.checkDatabaseHealth,
+    checkRedisHealth: deps.checkRedisHealth,
   });
 
-  // --- Authenticated ---------------------------------------------------------
-
+  const authService = createAuthService({
+    db: deps.db,
+    audit: deps.audit,
+    credentialMasterKey: deps.credentialMasterKey,
+  });
   const organizationsService = createOrganizationsService({ db: deps.db, audit: deps.audit });
+  const membersService = createMembersService({ db: deps.db, audit: deps.audit });
   const projectsService = createProjectsService({ db: deps.db, audit: deps.audit });
+  const assetsService = createAssetsService({ db: deps.db, audit: deps.audit });
+  const assessmentsService = createAssessmentsService({
+    db: deps.db,
+    audit: deps.audit,
+    assessmentJobsQueue: deps.assessmentJobsQueue,
+  });
   const apiKeysService = createApiKeysService({
     db: deps.db,
     audit: deps.audit,
     credentialMasterKey: deps.credentialMasterKey,
   });
 
-  // Reflects whichever principal actually authenticated the request (API-key
-  // auth only, in this batch — see docs/authorization.md). Not a user-profile
-  // endpoint: there is no user-login provider yet to back one honestly.
-  app.get('/api/v1/me', async (request) => {
-    const principal = requireAuthenticated(request);
-    return { principal };
-  });
-
-  app.get('/api/v1/organizations', async (request) => {
-    const principal = requireAuthenticated(request);
-    const organizations = await organizationsService.listVisibleTo(principal);
-    return { organizations };
-  });
-
-  app.post('/api/v1/organizations', async (request, reply) => {
-    const principal = requireAuthenticated(request);
-    const parsed = createOrganizationBodySchema.safeParse(request.body);
-    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
-
-    const organization = await organizationsService.create(
-      principal,
-      parsed.data,
-      requestContext(request),
-    );
-    reply.status(201);
-    return { organization };
-  });
-
-  app.get('/api/v1/projects', async (request) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const projects = await projectsService.list(principal);
-    return { projects };
-  });
-
-  app.post('/api/v1/projects', async (request, reply) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const parsed = createProjectBodySchema.safeParse(request.body);
-    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
-
-    try {
-      const project = await projectsService.create(principal, parsed.data, requestContext(request));
-      reply.status(201);
-      return { project };
-    } catch (error) {
-      if (isUniqueViolation(error)) {
-        return reply
-          .status(409)
-          .send(
-            errorEnvelope(
-              409,
-              'A project with this slug already exists in your organization',
-              request.id,
-            ),
-          );
-      }
-      throw error;
-    }
-  });
-
-  app.get('/api/v1/projects/:projectId', async (request, reply) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const { projectId } = request.params as { projectId: string };
-
-    const project = await projectsService.getById(principal, projectId);
-    if (!project) return reply.status(404).send(errorEnvelope(404, 'Not found', request.id));
-    return { project };
-  });
-
-  app.get('/api/v1/api-keys', async (request) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const apiKeys = await apiKeysService.list(principal);
-    return { apiKeys };
-  });
-
-  app.post('/api/v1/api-keys', async (request, reply) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const parsed = createApiKeyBodySchema.safeParse(request.body);
-    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
-
-    const created = await apiKeysService.create(
-      principal,
-      {
-        name: parsed.data.name,
-        expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : undefined,
-      },
-      requestContext(request),
-    );
-    reply.status(201);
-    // rawKey is present exactly once, in this response, and nowhere else.
-    return { apiKey: created };
-  });
-
-  app.delete('/api/v1/api-keys/:apiKeyId', async (request, reply) => {
-    const principal = requireTenant(requireAuthenticated(request));
-    const { apiKeyId } = request.params as { apiKeyId: string };
-
-    const revoked = await apiKeysService.revoke(principal, apiKeyId, requestContext(request));
-    if (!revoked) return reply.status(404).send(errorEnvelope(404, 'Not found', request.id));
-    return { apiKey: revoked };
-  });
+  registerAuthRoutes(app, { authService, isProduction: deps.isProduction });
+  registerOrganizationRoutes(app, { organizationsService, membersService });
+  registerProjectRoutes(app, { projectsService });
+  registerAssetRoutes(app, { assetsService });
+  registerAssessmentRoutes(app, { assessmentsService });
+  registerApiKeyRoutes(app, { apiKeysService });
 
   return app;
 }

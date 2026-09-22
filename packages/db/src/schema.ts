@@ -12,10 +12,21 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import type {
+  AssetConfig,
+  AssetBuildPlatform,
+  AssetStatus,
+  AssetType,
+  AssessmentStatus,
+  AssessmentJobStatus,
+  AssessmentType,
+} from '@aivoryx/shared-types';
 
-// Batch 2 domain schema: identity, tenancy, authorization, and commercial
-// foundation. No assessment/scanning/finding tables yet — those are added once
-// the scanner architecture lands in a later batch.
+// Batch 2 added identity, tenancy, authorization, and commercial foundation
+// tables. Batch 3 adds human authentication (sessions) and the security
+// assessment domain (assets, asset builds, assessments, assessment jobs). No
+// scanner/finding/report tables yet — those are added once the scanner
+// architecture lands in a later batch.
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -74,6 +85,37 @@ export const projectStatusEnum = pgEnum('project_status', ['active', 'archived']
 
 export const apiKeyStatusEnum = pgEnum('api_key_status', ['active', 'revoked']);
 
+// Batch 3 enums — values match packages/shared-types' string-literal unions
+// exactly (verified by the schema/shared-types consistency test); pgEnum
+// requires a literal array, so it can't import the shared_types const array
+// directly, but application code should treat @aivoryx/shared-types as the
+// source of truth for these value sets.
+export const assetTypeEnum = pgEnum('asset_type', ['WEB', 'API', 'ANDROID', 'IOS']);
+export const assetStatusEnum = pgEnum('asset_status', ['active', 'archived']);
+export const assetBuildPlatformEnum = pgEnum('asset_build_platform', ['apk', 'aab', 'ipa']);
+export const assessmentTypeEnum = pgEnum('assessment_type', [
+  'WEB',
+  'API',
+  'ANDROID_STATIC',
+  'ANDROID_DYNAMIC',
+  'IOS_STATIC',
+  'IOS_DYNAMIC',
+]);
+export const assessmentStatusEnum = pgEnum('assessment_status', [
+  'QUEUED',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+]);
+export const assessmentJobStatusEnum = pgEnum('assessment_job_status', [
+  'QUEUED',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+]);
+
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
@@ -86,6 +128,9 @@ export const users = pgTable('users', {
   name: text('name'),
   avatarUrl: text('avatar_url'),
   status: userStatusEnum('status').notNull().default('active'),
+  // Nullable: not every user has a password (e.g. a future OAuth-only user).
+  // Never select/log/serialize this column — see packages/auth/src/password.ts.
+  passwordHash: text('password_hash'),
   // Nullable: most users have no platform role at all. Presence of a role here
   // is the *entire* platform-access grant — it is never inferred from tenant data.
   platformRole: platformRoleEnum('platform_role'),
@@ -93,6 +138,31 @@ export const users = pgTable('users', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
 });
+
+// ---------------------------------------------------------------------------
+// Sessions (human browser authentication — see packages/auth/src/session.ts)
+// ---------------------------------------------------------------------------
+
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Keyed-HMAC hash of the session token — the raw token is set once in an
+    // httpOnly cookie and never persisted. Same rationale as api_keys.key_hash.
+    tokenHash: text('token_hash').notNull().unique(),
+    userAgent: text('user_agent'),
+    ipAddress: text('ip_address'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    userIdIdx: index('sessions_user_id_idx').on(table.userId),
+  }),
+);
 
 // ---------------------------------------------------------------------------
 // Organizations (tenants)
@@ -267,6 +337,140 @@ export const projects = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Assets (the thing a project wants assessed — belongs to exactly one project)
+// ---------------------------------------------------------------------------
+
+export const assets = pgTable(
+  'assets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    assetType: assetTypeEnum('asset_type').$type<AssetType>().notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    status: assetStatusEnum('status').$type<AssetStatus>().notNull().default('active'),
+    // The security boundary: no assessment may be created against an asset
+    // until this is true. See docs/security-model.md and
+    // apps/api/src/services/assessments.ts.
+    authorizationConfirmed: boolean('authorization_confirmed').notNull().default(false),
+    authorizationConfirmedBy: uuid('authorization_confirmed_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    authorizationConfirmedAt: timestamp('authorization_confirmed_at', { withTimezone: true }),
+    // Type-specific config (WebAssetConfig | ApiAssetConfig | AndroidAssetConfig |
+    // IosAssetConfig) — see packages/shared-types/src/assets.ts. Validated at the
+    // service layer against `assetType` before being written.
+    config: jsonb('config')
+      .$type<AssetConfig>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    projectIdIdx: index('assets_project_id_idx').on(table.projectId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Asset builds (mobile build metadata only — no binary content, no object
+// storage integration yet; storageKey is an abstract reference for a future
+// S3-compatible backend)
+// ---------------------------------------------------------------------------
+
+export const assetBuilds = pgTable(
+  'asset_builds',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assetId: uuid('asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    originalFilename: text('original_filename').notNull(),
+    // Opaque reference into a future object-storage backend — never a
+    // filesystem path, never binary content in this database.
+    storageKey: text('storage_key').notNull(),
+    sha256: text('sha256').notNull(),
+    sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+    version: text('version'),
+    platform: assetBuildPlatformEnum('platform').$type<AssetBuildPlatform>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assetIdIdx: index('asset_builds_asset_id_idx').on(table.assetId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Assessments (never called "Scan" — see docs/architecture.md)
+// ---------------------------------------------------------------------------
+
+export const assessments = pgTable(
+  'assessments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    // Denormalized alongside assetId (asset already implies a project) purely
+    // to make "list assessments for a project" a single indexed lookup instead
+    // of a join; always kept equal to assets.projectId at write time.
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    assetId: uuid('asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    assessmentType: assessmentTypeEnum('assessment_type').$type<AssessmentType>().notNull(),
+    assetBuildId: uuid('asset_build_id').references(() => assetBuilds.id, { onDelete: 'set null' }),
+    status: assessmentStatusEnum('status').$type<AssessmentStatus>().notNull().default('QUEUED'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    projectIdIdx: index('assessments_project_id_idx').on(table.projectId),
+    assetIdIdx: index('assessments_asset_id_idx').on(table.assetId),
+    statusIdx: index('assessments_status_idx').on(table.status),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Assessment jobs (Assessment -> AssessmentJob -> BullMQ job; see
+// packages/queue's assessment-jobs queue. No scanner executes yet — a job
+// existing only proves the pipeline, it never makes an outbound request.)
+// ---------------------------------------------------------------------------
+
+export const assessmentJobs = pgTable(
+  'assessment_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    jobType: text('job_type').notNull(),
+    status: assessmentJobStatusEnum('status')
+      .$type<AssessmentJobStatus>()
+      .notNull()
+      .default('QUEUED'),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    // BullMQ job id, once enqueued — lets a future worker correlate this row
+    // back to the queue (or re-enqueue on resume) without guessing.
+    queueJobId: text('queue_job_id'),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assessmentIdIdx: index('assessment_jobs_assessment_id_idx').on(table.assessmentId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // API keys (raw secret is NEVER persisted — only a keyed hash + safe prefix)
 // ---------------------------------------------------------------------------
 
@@ -395,3 +599,18 @@ export type NewAuditEvent = typeof auditEvents.$inferInsert;
 
 export type OrganizationUsage = typeof organizationUsage.$inferSelect;
 export type NewOrganizationUsage = typeof organizationUsage.$inferInsert;
+
+export type Session = typeof sessions.$inferSelect;
+export type NewSession = typeof sessions.$inferInsert;
+
+export type Asset = typeof assets.$inferSelect;
+export type NewAsset = typeof assets.$inferInsert;
+
+export type AssetBuild = typeof assetBuilds.$inferSelect;
+export type NewAssetBuild = typeof assetBuilds.$inferInsert;
+
+export type Assessment = typeof assessments.$inferSelect;
+export type NewAssessment = typeof assessments.$inferInsert;
+
+export type AssessmentJob = typeof assessmentJobs.$inferSelect;
+export type NewAssessmentJob = typeof assessmentJobs.$inferInsert;
