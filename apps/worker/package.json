@@ -1,0 +1,26 @@
+{
+  "name": "@aivoryx/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "dev": "node --watch dist/index.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@aivoryx/config": "workspace:*",
+    "@aivoryx/logger": "workspace:*",
+    "@aivoryx/queue": "workspace:*",
+    "@aivoryx/shared-types": "workspace:*",
+    "bullmq": "^5.28.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.7.5",
+    "vitest": "^2.1.4"
+  }
+}

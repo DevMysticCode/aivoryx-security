@@ -1,0 +1,16 @@
+{
+  "files": [],
+  "references": [
+    { "path": "apps/api" },
+    { "path": "apps/worker" },
+    { "path": "apps/report-worker" },
+    { "path": "packages/shared-types" },
+    { "path": "packages/config" },
+    { "path": "packages/logger" },
+    { "path": "packages/db" },
+    { "path": "packages/queue" },
+    { "path": "packages/scanner-core" },
+    { "path": "packages/ai-core" },
+    { "path": "packages/report-core" }
+  ]
+}

@@ -1,0 +1,7 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'packages/scanners/*'
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: true
