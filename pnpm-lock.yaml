@@ -32,6 +32,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@aivoryx/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@aivoryx/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -50,9 +53,15 @@ importers:
       '@fastify/helmet':
         specifier: ^12.0.1
         version: 12.0.1
+      drizzle-orm:
+        specifier: ^0.36.1
+        version: 0.36.4(@types/react@18.3.31)(postgres@3.4.9)(react@18.3.1)
       fastify:
         specifier: ^5.1.0
         version: 5.12.5
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.7.5
@@ -150,6 +159,30 @@ importers:
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
+
+  packages/auth:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.4)(supports-color@7.2.0)
+
+  packages/billing:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.4)(supports-color@7.2.0)
 
   packages/config:
     dependencies:

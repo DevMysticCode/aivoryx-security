@@ -1,8 +1,16 @@
 # @aivoryx/db
 
 PostgreSQL client and migration infrastructure, built on [Drizzle ORM](https://orm.drizzle.team/)
-and [postgres.js](https://github.com/porsager/postgres). No domain tables exist yet — `src/schema.ts`
-is intentionally empty until a later batch introduces the domain model.
+and [postgres.js](https://github.com/porsager/postgres).
+
+`src/schema.ts` holds the Batch 2 identity/tenancy/billing domain model: `users`,
+`organizations`, `organization_members`, `plans`, `subscriptions`, `payments`,
+`projects`, `api_keys`, `audit_events`, `organization_usage`. No assessment/scanning/
+finding tables exist yet — see [docs/security-model.md](../../docs/security-model.md).
+
+`src/audit.ts` exports `createAuditService(db)`, a reusable write path for
+`audit_events` that redacts secret-shaped metadata keys and caps metadata size —
+consumers should use it rather than inserting into `audit_events` directly.
 
 ## Why Drizzle
 
@@ -33,8 +41,13 @@ pnpm --filter @aivoryx/db db:generate   # generate a migration from schema.ts ch
 pnpm --filter @aivoryx/db build && pnpm --filter @aivoryx/db db:migrate  # apply migrations
 ```
 
-`migrations/` currently has zero migrations (an empty journal) — `runMigrations()` is a safe no-op
-until the first domain schema lands.
+`migrations/0000_windy_the_renegades.sql` is the initial migration (the Batch 2 domain
+schema above). Applying it to a fresh Batch 1 database:
+
+```bash
+pnpm --filter @aivoryx/db build
+node --env-file=.env packages/db/dist/migrate-cli.js
+```
 
 ## Tests
 
