@@ -7,7 +7,7 @@ import {
   createPlaceholderProcessor,
   QUEUE_NAMES,
 } from '@aivoryx/queue';
-import { SCANNER_REGISTRY } from '@aivoryx/scanner-http-reachability';
+import { SCANNER_REGISTRY } from '@aivoryx/scanner-web-discovery';
 import { createShutdownHandler } from './shutdown.js';
 import { createAssessmentJobProcessor } from './assessment-processor.js';
 
@@ -21,8 +21,10 @@ async function main(): Promise<void> {
     db: dbClient.db,
     logger: withContext(logger, { queue: QUEUE_NAMES.ASSESSMENT_JOBS }),
     config,
-    // The scanner plugin registry this worker process can run. Only http-
-    // reachability exists in this batch — see Part L / docs/security-model.md.
+    // The scanner plugin registry this worker process can run. web-discovery
+    // (Batch 6) supersedes http-reachability for WEB/WEB assessments — it
+    // performs the same reachability check plus passive analysis plus
+    // scope-aware crawling, all from the same fetches. See docs/security-model.md.
     scannerRegistry: SCANNER_REGISTRY,
   });
 

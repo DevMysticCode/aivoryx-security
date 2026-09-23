@@ -3,8 +3,10 @@ import type {
   AssessmentType,
   AssetConfig,
   AssetType,
+  DiscoveryMethod,
   FindingConfidence,
   FindingSeverity,
+  UrlType,
 } from '@aivoryx/shared-types';
 import type { SafeHttpClient } from './http-client.js';
 
@@ -37,6 +39,25 @@ export interface ReportFindingInput {
 }
 
 /**
+ * One discovered URL/resource, reported by a discovery-capable scanner
+ * (Batch 6). The worker persists these into `discovered_urls` — metadata
+ * only, never a raw response body. See Part 16/17.
+ */
+export interface ReportDiscoveredUrlInput {
+  /** Normalized URL — sensitive-looking query parameter values already redacted. */
+  url: string;
+  sourceUrl?: string | null;
+  type: UrlType;
+  discoveryMethod: DiscoveryMethod;
+  depth: number;
+  statusCode?: number | null;
+  contentType?: string | null;
+  responseBytes?: number | null;
+  /** Type-specific metadata (e.g. a FORM_ACTION's method/input names) — names/types only, never values. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
  * The capability-scoped context a scanner receives. Deliberately excludes
  * database/Redis credentials, raw environment variables, and any HTTP client
  * other than the scoped SafeHttpClient — see Part J.
@@ -48,6 +69,8 @@ export interface ScannerContext {
   httpClient: SafeHttpClient;
   logger: ScannerLogger;
   reportFinding: (input: ReportFindingInput) => Promise<void>;
+  /** Optional: only discovery-capable scanners report discovered URLs (Batch 6). */
+  reportDiscoveredUrl?: (input: ReportDiscoveredUrlInput) => Promise<void>;
   signal: AbortSignal;
 }
 

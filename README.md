@@ -2,15 +2,16 @@
 
 Application security assessment platform — monorepo.
 
-**Status:** Batch 5 (Passive Web Security Engine) complete. Human identity, the full
+**Status:** Batch 6 (Scope-Aware Web Discovery) complete. Human identity, the full
 Project → Asset → Assessment → AssessmentJob domain model, an explicit assessment
-scope, SSRF protection, a DNS-rebinding-resistant safe HTTP client, a scanner
-plugin architecture, and a passive web security analysis engine (security headers,
-cookies, CORS, information disclosure, transport, HTTP behavior — all derived from
-one controlled HTTP request) are implemented — `apps/worker` now actually executes
-assessments end to end and produces deterministic, evidence-backed findings. **No
-vulnerability detection/exploitation, crawling, or mobile scanning exists yet** —
-see [docs/security-model.md](docs/security-model.md) for what's implemented versus
+scope, SSRF protection, a DNS-rebinding-resistant safe HTTP client, a passive web
+security analysis engine, and a bounded, scope-aware crawler (link/resource/form
+discovery, robots.txt/sitemap.xml support, conservative depth/URL/request limits)
+are implemented — `apps/worker` now crawls the authorized in-scope attack surface
+and runs passive analysis on every fetched page, persisting both findings and the
+discovered URL graph. **No vulnerability detection/exploitation, form submission,
+JavaScript execution/browser automation, or mobile scanning exists yet** — see
+[docs/security-model.md](docs/security-model.md) for what's implemented versus
 still future.
 
 ## Structure
@@ -35,9 +36,13 @@ still future.
                   BillingProvider interface (no live payment integration)
   scanner-core    ScannerPlugin interface, AssessmentScope/SSRF validation,
                   DNS-rebinding-resistant SafeHttpClient, finding deduplication,
-                  HttpObservation model + PassiveCheck registry/runner
-  scanners        http-reachability (Batch 4) + web-passive (Batch 5: security-headers,
-                  cookies, cors, information-disclosure, transport, http-behavior)
+                  HttpObservation model + PassiveCheck registry/runner,
+                  ReportDiscoveredUrlInput (Batch 6)
+  scanners        http-reachability (Batch 4, standalone) + web-passive (Batch 5:
+                  security-headers, cookies, cors, information-disclosure, transport,
+                  http-behavior) + web-discovery (Batch 6: the active WEB scanner —
+                  bounded BFS crawl, URL normalization, robots.txt/sitemap.xml,
+                  form/resource discovery, runs web-passive per fetched page)
   ai-core         AIProvider interface + providers (optional, not wired in yet)
   report-core     HTML/PDF report templating
 /infrastructure

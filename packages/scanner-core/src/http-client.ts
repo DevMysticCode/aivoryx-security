@@ -40,6 +40,8 @@ export interface SafeHttpResponse {
   httpVersion: string;
   redirectCount: number;
   hops: SafeHttpHop[];
+  /** Decoded (UTF-8) response body, truncated at maxResponseBytes — see bodyTruncated. Never decompressed (see Part G). */
+  body: string;
   bodyBytesRead: number;
   bodyTruncated: boolean;
   durationMs: number;
@@ -104,6 +106,7 @@ export class SafeHttpClient {
           httpVersion: result.httpVersion,
           redirectCount,
           hops,
+          body: result.body,
           bodyBytesRead: result.bodyBytesRead,
           bodyTruncated: result.bodyTruncated,
           durationMs: Date.now() - started,
@@ -145,6 +148,7 @@ export class SafeHttpClient {
     setCookieHeaders: string[];
     tlsProtocol: string | null;
     httpVersion: string;
+    body: string;
     bodyBytesRead: number;
     bodyTruncated: boolean;
   }> {
@@ -253,6 +257,13 @@ export class SafeHttpClient {
 
         let bytesRead = 0;
         let truncated = false;
+        // Buffered only up to maxResponseBytes (the same limit that stops
+        // reading at all) — never unbounded, and never larger than the
+        // response-size limit already enforced below. Used by discovery/
+        // passive-analysis callers that need to parse HTML/XML; scanners
+        // that only need status/headers (e.g. http-reachability) simply
+        // don't read this field.
+        const chunks: Buffer[] = [];
 
         res.on('data', (chunk: Buffer) => {
           bytesRead += chunk.length;
@@ -264,7 +275,9 @@ export class SafeHttpClient {
           if (bytesRead > maxResponseBytes) {
             truncated = true;
             res.destroy();
+            return;
           }
+          chunks.push(chunk);
         });
 
         res.once('end', () => {
@@ -275,6 +288,7 @@ export class SafeHttpClient {
               setCookieHeaders,
               tlsProtocol,
               httpVersion: res.httpVersion,
+              body: Buffer.concat(chunks).toString('utf8'),
               bodyBytesRead: bytesRead,
               bodyTruncated: truncated,
             }),
@@ -290,6 +304,7 @@ export class SafeHttpClient {
                 setCookieHeaders,
                 tlsProtocol,
                 httpVersion: res.httpVersion,
+                body: Buffer.concat(chunks).toString('utf8'),
                 bodyBytesRead: bytesRead,
                 bodyTruncated: true,
               }),

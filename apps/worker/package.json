@@ -18,7 +18,7 @@
     "@aivoryx/logger": "workspace:*",
     "@aivoryx/queue": "workspace:*",
     "@aivoryx/scanner-core": "workspace:*",
-    "@aivoryx/scanner-http-reachability": "workspace:*",
+    "@aivoryx/scanner-web-discovery": "workspace:*",
     "@aivoryx/shared-types": "workspace:*",
     "bullmq": "^5.28.1",
     "drizzle-orm": "^0.36.1"

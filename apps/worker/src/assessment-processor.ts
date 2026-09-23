@@ -17,6 +17,7 @@ import {
   type ScannerContext,
   type ScannerPlugin,
   type ReportFindingInput,
+  type ReportDiscoveredUrlInput,
 } from '@aivoryx/scanner-core';
 
 export interface AssessmentProcessorDeps {
@@ -191,6 +192,8 @@ export function createAssessmentJobProcessor(deps: AssessmentProcessorDeps) {
           signal: abortController.signal,
           reportFinding: (input: ReportFindingInput) =>
             persistFinding(deps, assessmentId, plugin.name, input),
+          reportDiscoveredUrl: (input: ReportDiscoveredUrlInput) =>
+            persistDiscoveredUrl(deps, assessmentId, input),
         };
         await plugin.run(context);
       }
@@ -279,6 +282,55 @@ async function persistFinding(
       .insert(schema.evidence)
       .values({ findingId: finding.id, data: sanitizeEvidence(input.evidence) });
   }
+}
+
+const MAX_DISCOVERY_METADATA_BYTES = 4_000;
+
+/** Never persist raw secrets/cookies/response bodies in discovery metadata, and bound its size — same discipline as sanitizeEvidence. Batch 6 Part 17. */
+function sanitizeDiscoveryMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const redacted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    redacted[key] = SECRET_KEY_PATTERN.test(key) ? '[redacted]' : value;
+  }
+  const serialized = JSON.stringify(redacted);
+  if (serialized.length > MAX_DISCOVERY_METADATA_BYTES) {
+    return { truncated: true, originalSizeBytes: serialized.length };
+  }
+  return redacted;
+}
+
+/**
+ * Persists one discovered URL/resource/form. Deduplicated at the database
+ * level by (assessmentId, url, urlType) — a URL rediscovered via a
+ * different path on a retried job is a safe no-op, never a duplicate row.
+ * See Part 16/19.
+ */
+async function persistDiscoveredUrl(
+  deps: AssessmentProcessorDeps,
+  assessmentId: string,
+  input: ReportDiscoveredUrlInput,
+): Promise<void> {
+  await deps.db
+    .insert(schema.discoveredUrls)
+    .values({
+      assessmentId,
+      url: input.url,
+      sourceUrl: input.sourceUrl ?? null,
+      urlType: input.type,
+      discoveryMethod: input.discoveryMethod,
+      depth: input.depth,
+      statusCode: input.statusCode ?? null,
+      contentType: input.contentType ?? null,
+      responseBytes: input.responseBytes ?? null,
+      metadata: input.metadata ? sanitizeDiscoveryMetadata(input.metadata) : {},
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.discoveredUrls.assessmentId,
+        schema.discoveredUrls.url,
+        schema.discoveredUrls.urlType,
+      ],
+    });
 }
 
 async function markCompleted(

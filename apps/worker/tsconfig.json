@@ -14,6 +14,6 @@
     { "path": "../../packages/queue" },
     { "path": "../../packages/db" },
     { "path": "../../packages/scanner-core" },
-    { "path": "../../packages/scanners/http-reachability" }
+    { "path": "../../packages/scanners/web-discovery" }
   ]
 }

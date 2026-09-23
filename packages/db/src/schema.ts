@@ -21,9 +21,11 @@ import type {
   AssessmentStatus,
   AssessmentJobStatus,
   AssessmentType,
+  DiscoveryMethod,
   FindingConfidence,
   FindingSeverity,
   FindingStatus,
+  UrlType,
 } from '@aivoryx/shared-types';
 
 // Batch 2 added identity, tenancy, authorization, and commercial foundation
@@ -139,6 +141,24 @@ export const findingStatusEnum = pgEnum('finding_status', [
   'ACKNOWLEDGED',
   'RESOLVED',
   'FALSE_POSITIVE',
+]);
+
+// Batch 6 enums (web discovery).
+export const discoveredUrlTypeEnum = pgEnum('discovered_url_type', [
+  'PAGE',
+  'RESOURCE',
+  'FORM_ACTION',
+  'SITEMAP',
+  'ROBOTS',
+]);
+export const discoveryMethodEnum = pgEnum('discovery_method', [
+  'SEED',
+  'HTML_LINK',
+  'HTML_RESOURCE',
+  'FORM',
+  'ROBOTS',
+  'SITEMAP',
+  'REDIRECT',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -580,6 +600,51 @@ export const evidence = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Discovered URLs (scope-aware crawl attack-surface — Batch 6). Metadata
+// only — never raw response bodies, cookies, or Authorization headers. See
+// packages/scanners/web-discovery and docs/security-model.md.
+// ---------------------------------------------------------------------------
+
+export const discoveredUrls = pgTable(
+  'discovered_urls',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    // Normalized, in-scope URL — sensitive-looking query parameter VALUES are
+    // redacted before this is ever written (see url-normalize.ts's
+    // redactSensitiveQueryParams) — this is the identity used for dedup.
+    url: text('url').notNull(),
+    sourceUrl: text('source_url'),
+    urlType: discoveredUrlTypeEnum('url_type').$type<UrlType>().notNull(),
+    discoveryMethod: discoveryMethodEnum('discovery_method').$type<DiscoveryMethod>().notNull(),
+    depth: integer('depth').notNull(),
+    statusCode: integer('status_code'),
+    contentType: text('content_type'),
+    responseBytes: integer('response_bytes'),
+    // Type-specific extra metadata (e.g. FORM_ACTION's method/input names —
+    // names and types only, never values). Empty for most rows.
+    metadata: jsonb('metadata')
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assessmentIdIdx: index('discovered_urls_assessment_id_idx').on(table.assessmentId),
+    // A URL can legitimately appear once per role (e.g. as a PAGE and,
+    // separately, as a FORM_ACTION) but never twice in the same role.
+    assessmentUrlTypeUnique: uniqueIndex('discovered_urls_assessment_url_type_unique').on(
+      table.assessmentId,
+      table.url,
+      table.urlType,
+    ),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // API keys (raw secret is NEVER persisted — only a keyed hash + safe prefix)
 // ---------------------------------------------------------------------------
 
@@ -729,3 +794,6 @@ export type NewFinding = typeof findings.$inferInsert;
 
 export type Evidence = typeof evidence.$inferSelect;
 export type NewEvidence = typeof evidence.$inferInsert;
+
+export type DiscoveredUrl = typeof discoveredUrls.$inferSelect;
+export type NewDiscoveredUrl = typeof discoveredUrls.$inferInsert;

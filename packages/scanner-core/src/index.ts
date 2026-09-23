@@ -46,6 +46,7 @@ export type {
   ScannerContext,
   ScannerPlugin,
   ReportFindingInput,
+  ReportDiscoveredUrlInput,
 } from './plugin.js';
 
 export { computeFindingFingerprint } from './fingerprint.js';

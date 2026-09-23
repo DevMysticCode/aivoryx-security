@@ -848,6 +848,148 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
     }, 15_000);
   });
 
+  describe('discovered-urls', () => {
+    async function setupAssessmentWithDiscoveredUrls(label: string) {
+      const owner = await registerAndLogin(label);
+      const org = await createOrgAsOwner(owner.sessionCookie, label);
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: label, slug: `${label}-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+      const assetResponse = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: {
+          assetType: 'WEB',
+          name: `${label} asset`,
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      const assetId = assetResponse.json().asset.id as string;
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...auth,
+        payload: { authorizationConfirmed: true },
+      });
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      const assessmentId = created.json().assessment.id as string;
+
+      // The worker isn't running in this test — insert discovery rows
+      // directly (as apps/worker would) to test the API's read path
+      // independently of crawler execution.
+      // Inserted one statement at a time (as the worker's reportDiscoveredUrl
+      // does in production — never a batched insert) so each row's
+      // defaultNow() createdAt is genuinely sequential, matching the
+      // service's deterministic (createdAt, id) ordering.
+      await client.db.insert(schema.discoveredUrls).values({
+        assessmentId,
+        url: 'https://example.com/',
+        sourceUrl: null,
+        urlType: 'PAGE',
+        discoveryMethod: 'SEED',
+        depth: 0,
+        statusCode: 200,
+        contentType: 'text/html',
+      });
+      await client.db.insert(schema.discoveredUrls).values({
+        assessmentId,
+        url: 'https://example.com/about',
+        sourceUrl: 'https://example.com/',
+        urlType: 'PAGE',
+        discoveryMethod: 'HTML_LINK',
+        depth: 1,
+        statusCode: 200,
+        contentType: 'text/html',
+      });
+      await client.db.insert(schema.discoveredUrls).values({
+        assessmentId,
+        url: 'https://example.com/app.js',
+        sourceUrl: 'https://example.com/',
+        urlType: 'RESOURCE',
+        discoveryMethod: 'HTML_RESOURCE',
+        depth: 1,
+        contentType: 'application/javascript',
+      });
+
+      return { auth, assessmentId };
+    }
+
+    it('lists discovered URLs for an assessment the caller can access, in deterministic order', async () => {
+      const { auth, assessmentId } = await setupAssessmentWithDiscoveredUrls('discovery-list');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/discovered-urls`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.discoveredUrls).toHaveLength(3);
+      expect(body.pagination).toMatchObject({ total: 3, limit: 50, offset: 0 });
+      // Deterministic ordering: seed (created first) comes before later discoveries.
+      expect(body.discoveredUrls[0].url).toBe('https://example.com/');
+    }, 15_000);
+
+    it('filters by urlType', async () => {
+      const { auth, assessmentId } = await setupAssessmentWithDiscoveredUrls('discovery-filter');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/discovered-urls?urlType=RESOURCE`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.discoveredUrls).toHaveLength(1);
+      expect(body.discoveredUrls[0].urlType).toBe('RESOURCE');
+    }, 15_000);
+
+    it('paginates with limit/offset', async () => {
+      const { auth, assessmentId } = await setupAssessmentWithDiscoveredUrls('discovery-paginate');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/discovered-urls?limit=1&offset=1`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.discoveredUrls).toHaveLength(1);
+      expect(body.pagination).toMatchObject({ total: 3, limit: 1, offset: 1 });
+    }, 15_000);
+
+    it('an organization cannot list another organization discovered URLs (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('discovery-iso-a');
+      const { assessmentId } = await setupAssessmentWithDiscoveredUrls('discovery-iso-b');
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/discovered-urls`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+      });
+      expect(response.statusCode).toBe(404);
+    }, 15_000);
+
+    it('exposes no route to create, update, or delete a discovered URL', async () => {
+      const { auth } = await setupAssessmentWithDiscoveredUrls('discovery-immutable');
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/v1/discovered-urls',
+        ...auth,
+        payload: {},
+      });
+      expect(create.statusCode).toBe(404);
+    }, 15_000);
+  });
+
   describe('legacy API-key path (Batch 2 behavior preserved)', () => {
     it('an API key still authenticates and is tenant-isolated', async () => {
       const owner = await registerAndLogin('legacy-key-owner');

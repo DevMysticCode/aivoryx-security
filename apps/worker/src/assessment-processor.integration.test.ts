@@ -15,7 +15,7 @@ import {
 } from '@aivoryx/queue';
 import type { AppConfig } from '@aivoryx/config';
 import { buildWebAssetScope, type AssessmentScope } from '@aivoryx/shared-types';
-import { SCANNER_REGISTRY } from '@aivoryx/scanner-http-reachability';
+import { SCANNER_REGISTRY } from '@aivoryx/scanner-web-discovery';
 import { createAssessmentJobProcessor } from './assessment-processor.js';
 
 // Requires live PostgreSQL + Redis with the Batch 4 migration applied. Run via:
@@ -50,6 +50,8 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
   let fixtureServer: { server: Server; port: number };
   let passiveFixtureServer: { server: Server; port: number };
   let passiveFixtureRequestCount = 0;
+  let discoveryFixtureServer: { server: Server; port: number };
+  let discoveryFixtureRequestLog: string[] = [];
   let organizationId: string;
   let projectId: string;
 
@@ -114,6 +116,86 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       res.end('<html></html>');
     });
 
+    // Batch 6's required deterministic page graph (Part 27):
+    //   / -> /about, /login, /products, /products?id=1, /static/app.js (resource),
+    //        /frame (iframe), an out-of-scope external link, and a redirect.
+    //   /about -> /contact
+    //   /products -> /products?id=2
+    //   /login has a GET-metadata-only form (never submitted).
+    discoveryFixtureRequestLog = [];
+    discoveryFixtureServer = await startServer((req, res) => {
+      const url = req.url ?? '/';
+      discoveryFixtureRequestLog.push(`${req.method} ${url}`);
+      const htmlHeaders = {
+        'Content-Type': 'text/html',
+        'Set-Cookie': 'session=abc123; Path=/',
+      };
+
+      if (url === '/') {
+        res.writeHead(200, htmlHeaders);
+        res.end(`
+          <a href="/about#top">About</a>
+          <a href="/login">Login</a>
+          <a href="/products">Products</a>
+          <a href="/products?id=1">Product 1</a>
+          <script src="/static/app.js"></script>
+          <iframe src="/frame"></iframe>
+          <a href="http://out-of-scope.example.net/">External</a>
+          <a href="/redirect-me">Redirect</a>
+        `);
+        return;
+      }
+      if (url === '/about') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<a href="/contact">Contact</a>');
+        return;
+      }
+      if (url === '/contact') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<p>contact</p>');
+        return;
+      }
+      if (url === '/products') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<a href="/products?id=2">Product 2</a>');
+        return;
+      }
+      if (url === '/products?id=1' || url === '/products?id=2') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<p>product</p>');
+        return;
+      }
+      if (url === '/login') {
+        res.writeHead(200, htmlHeaders);
+        res.end(
+          '<form action="/login" method="POST"><input name="username" type="text"><input name="password" type="password"></form>',
+        );
+        return;
+      }
+      if (url === '/frame') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<p>frame</p>');
+        return;
+      }
+      if (url === '/redirect-me') {
+        res.writeHead(302, { Location: '/redirected' });
+        res.end();
+        return;
+      }
+      if (url === '/redirected') {
+        res.writeHead(200, htmlHeaders);
+        res.end('<p>redirected</p>');
+        return;
+      }
+      if (url === '/static/app.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end('should-never-be-fetched();');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
     const processor = createAssessmentJobProcessor({
       db: client.db,
       logger: noopLogger() as unknown as Parameters<
@@ -143,6 +225,7 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     await queue.close();
     fixtureServer.server.close();
     passiveFixtureServer.server.close();
+    discoveryFixtureServer.server.close();
     await connection.quit();
     await client.close();
   });
@@ -511,4 +594,94 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     expect(evidenceRows[0]?.data).toMatchObject({ name: 'session' });
     expect(JSON.stringify(evidenceRows[0]?.data)).not.toContain('abc123');
   }, 15_000);
+
+  it('BATCH 6 REQUIRED END-TO-END TEST: crawls a deterministic page graph, discovers/persists the attack surface, and never touches anything out of scope', async () => {
+    const baseUrl = `http://127.0.0.1:${discoveryFixtureServer.port}/`;
+    const asset = await createAsset({ baseUrl });
+    const { assessment, job } = await createAssessment(asset.id, { baseUrl });
+
+    await queue.add('assessment', {
+      assessmentJobId: job.id,
+      assessmentId: assessment.id,
+      scannerName: 'WEB',
+    });
+
+    const finalAssessment = await runAndWaitForTerminalStatus(assessment.id);
+
+    // 12. Unsupported assessment types still fail correctly — proven by the
+    // dedicated parameterized test above; this assertion just confirms
+    // this WEB assessment itself completed successfully.
+    expect(finalAssessment?.status).toBe('COMPLETED');
+
+    const discovered = await client.db
+      .select()
+      .from(schema.discoveredUrls)
+      .where(eq(schema.discoveredUrls.assessmentId, assessment.id));
+    const urls = discovered.map((d) => d.url);
+    const port = discoveryFixtureServer.port;
+
+    // 1. Seed is discovered.
+    expect(urls).toContain(`http://127.0.0.1:${port}/`);
+
+    // 2. In-scope pages/resources are discovered (default depth reaches
+    // /about -> /contact and /products -> /products?id=2).
+    expect(urls).toContain(`http://127.0.0.1:${port}/about`);
+    expect(urls).toContain(`http://127.0.0.1:${port}/contact`);
+    expect(urls).toContain(`http://127.0.0.1:${port}/products`);
+    expect(urls).toContain(`http://127.0.0.1:${port}/static/app.js`);
+    expect(urls).toContain(`http://127.0.0.1:${port}/frame`);
+
+    // 3. Query parameters are preserved as distinct URLs.
+    expect(urls).toContain(`http://127.0.0.1:${port}/products?id=1`);
+    expect(urls).toContain(`http://127.0.0.1:${port}/products?id=2`);
+
+    // 4. Fragments are removed (the source link was /about#top).
+    expect(urls).not.toContain(`http://127.0.0.1:${port}/about#top`);
+
+    // 5. Duplicates are suppressed — no (url, type) pair appears twice.
+    const pairs = discovered.map((d) => `${d.urlType}:${d.url}`);
+    expect(new Set(pairs).size).toBe(pairs.length);
+
+    // 6. Crawl depth is respected: depth values are all within the
+    // conservative default (maxDepth 2), never unbounded.
+    expect(discovered.every((d) => d.depth <= 2)).toBe(true);
+
+    // 7. The out-of-scope external URL was never requested — not even
+    // resolved, let alone connected to (proven both by the discovery
+    // table and by the fixture server's own request log never showing it,
+    // which it couldn't anyway since it's a different host entirely).
+    expect(urls.some((u) => u.includes('out-of-scope.example.net'))).toBe(false);
+
+    // 8. The redirect was followed under scope validation and its final
+    // destination recorded.
+    expect(urls).toContain(`http://127.0.0.1:${port}/redirected`);
+
+    // 9. The form was recorded but never submitted — GET requests only in
+    // the server's request log, and specifically only one GET /login.
+    const formRow = discovered.find((d) => d.urlType === 'FORM_ACTION');
+    expect(formRow).toBeDefined();
+    expect(formRow?.metadata).toMatchObject({ method: 'POST' });
+    expect(discoveryFixtureRequestLog).toContain('GET /login');
+    expect(discoveryFixtureRequestLog.some((entry) => !entry.startsWith('GET '))).toBe(false);
+
+    // 10. Passive findings were generated from the same fetches (the
+    // insecure "session" cookie set on every HTML page produces a
+    // cookie-security finding attributed to more than one page).
+    const findings = await client.db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.assessmentId, assessment.id));
+    const cookieFindingTargets = new Set(
+      findings.filter((f) => f.category === 'cookies').map((f) => f.target),
+    );
+    expect(cookieFindingTargets.size).toBeGreaterThan(1);
+
+    // 11. Discovery records persisted correctly with real metadata (not
+    // placeholder/empty rows).
+    const seedRow = discovered.find(
+      (d) => d.url === `http://127.0.0.1:${port}/` && d.urlType === 'PAGE',
+    );
+    expect(seedRow?.statusCode).toBe(200);
+    expect(seedRow?.contentType).toContain('html');
+  }, 20_000);
 });

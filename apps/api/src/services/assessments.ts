@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Queue } from 'bullmq';
 import { schema, type AuditService } from '@aivoryx/db';
@@ -9,6 +9,8 @@ import {
   isAssessmentTypeCompatibleWithAsset,
   type AssessmentScope,
   type AssessmentType,
+  type DiscoveryMethod,
+  type UrlType,
 } from '@aivoryx/shared-types';
 import type { AssessmentJobData } from '@aivoryx/queue';
 import { DomainError } from '../domain-errors.js';
@@ -265,6 +267,61 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
         .select()
         .from(schema.findings)
         .where(eq(schema.findings.assessmentId, assessmentId));
+    },
+
+    /**
+     * Discovered attack-surface for this assessment (Batch 6) — paginated,
+     * deterministically ordered (createdAt then id), with optional filters.
+     * Read-only: there is no create/update/delete route for discovery
+     * records, which are scanner-generated exactly like findings.
+     */
+    async listDiscoveredUrls(
+      identity: RequestIdentity,
+      assessmentId: string,
+      filters: {
+        urlType?: UrlType | undefined;
+        discoveryMethod?: DiscoveryMethod | undefined;
+        statusCode?: number | undefined;
+        contentType?: string | undefined;
+        limit?: number | undefined;
+        offset?: number | undefined;
+      } = {},
+    ) {
+      const context = await getAssessmentContext(deps, identity, assessmentId);
+      if (!context) return null;
+      if (!hasPermission(context.principal, 'finding:read')) return null;
+
+      const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200);
+      const offset = Math.max(filters.offset ?? 0, 0);
+
+      const conditions = [eq(schema.discoveredUrls.assessmentId, assessmentId)];
+      if (filters.urlType) conditions.push(eq(schema.discoveredUrls.urlType, filters.urlType));
+      if (filters.discoveryMethod) {
+        conditions.push(eq(schema.discoveredUrls.discoveryMethod, filters.discoveryMethod));
+      }
+      if (filters.statusCode !== undefined) {
+        conditions.push(eq(schema.discoveredUrls.statusCode, filters.statusCode));
+      }
+      if (filters.contentType) {
+        conditions.push(eq(schema.discoveredUrls.contentType, filters.contentType));
+      }
+      const where = and(...conditions);
+
+      const [items, totalRows] = await Promise.all([
+        deps.db
+          .select()
+          .from(schema.discoveredUrls)
+          .where(where)
+          .orderBy(asc(schema.discoveredUrls.createdAt), asc(schema.discoveredUrls.id))
+          .limit(limit)
+          .offset(offset),
+        deps.db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(schema.discoveredUrls)
+          .where(where),
+      ]);
+
+      return { items, total: totalRows[0]?.count ?? 0, limit, offset };
     },
 
     /**

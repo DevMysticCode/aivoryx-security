@@ -33,3 +33,6 @@ export {
   isFindingSeverity,
 } from './findings.js';
 export type { FindingSeverity, FindingConfidence, FindingStatus } from './findings.js';
+
+export { URL_TYPES, DISCOVERY_METHODS, isUrlType, isDiscoveryMethod } from './discovery.js';
+export type { UrlType, DiscoveryMethod } from './discovery.js';

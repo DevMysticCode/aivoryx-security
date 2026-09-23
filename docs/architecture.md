@@ -24,10 +24,14 @@ scanner engine: an explicit assessment scope, SSRF protection, a DNS-rebinding-
 resistant safe HTTP client, a scanner plugin architecture, and one non-invasive HTTP
 reachability scanner — `apps/worker` now actually executes assessments end to end
 (QUEUED → RUNNING → COMPLETED/FAILED) instead of only logging and acknowledging.
-Batch 5 adds a passive web security analysis engine on top: the reachability
+Batch 5 added a passive web security analysis engine on top: the reachability
 scanner's single HTTP response now also feeds a registry of deterministic passive
 checks (security headers, cookies, CORS, information disclosure, transport, HTTP
-behavior) — still exactly one outbound request per assessment. See
+behavior). Batch 6 turns that single fetch into a bounded, scope-aware crawl:
+in-scope pages/resources/forms are discovered breadth-first (conservative depth/URL/
+request limits) and every fetched HTML page — not just the seed — gets passive
+analysis, still through the same `SafeHttpClient`, still one request per URL, never a
+second fetch of the same page for discovery vs. analysis. See
 [security-model.md](security-model.md) for the full detail.
 
 ## Domain model
@@ -39,8 +43,9 @@ Organization
               ├── AssetBuild   (asset_builds — mobile build metadata only, no binaries)
               └── Assessment   (assessments — WEB | API | ANDROID_STATIC | ANDROID_DYNAMIC | IOS_STATIC | IOS_DYNAMIC; carries an immutable `scope` snapshot)
                     ├── AssessmentJob  (assessment_jobs — the row a BullMQ job id points back to)
-                    └── Finding        (findings — one per deduplicated scanner observation)
-                          └── Evidence (evidence — sanitized, size-capped request/response metadata)
+                    ├── Finding        (findings — one per deduplicated scanner observation)
+                    │     └── Evidence (evidence — sanitized, size-capped request/response metadata)
+                    └── DiscoveredUrl  (discovered_urls — one per deduplicated crawl discovery, Batch 6)
 ```
 
 - **Asset type determines valid assessment types** —
@@ -70,8 +75,8 @@ Organization
 | `packages/auth`         | Authentication/authorization **primitives only**: principal types, roles, permissions, the role→permission table, password hashing (Argon2id), session-token crypto, API-key crypto. No database access, no HTTP, no domain logic — see [authorization.md](authorization.md).                                                             |
 | `packages/billing`      | Provider-agnostic billing **domain types and pure functions**: plan catalog, seat-usage math, the `BillingProvider` interface. Untouched in Batch 3 beyond what Batch 2 already established — see [billing.md](billing.md).                                                                                                               |
 | `apps/api`              | HTTP concerns: routing, request validation (zod), the dual session/API-key auth context, and the service layer (`apps/api/src/services/*`) that combines authorization checks with `packages/db` queries and `packages/queue` enqueues. **Never makes a target HTTP request itself.**                                                     |
-| `packages/scanner-core` | The scanner plugin framework: `ScannerPlugin`/`ScannerContext`, `AssessmentScope` validation, SSRF policy, the DNS-rebinding-resistant `SafeHttpClient` (Batch 4); `HttpObservation`, `PassiveCheck`, and the passive-check runner (Batch 5). No database access, no HTTP server.                                                         |
-| `packages/scanners/*`   | Individual scanner plugins/check packages. `http-reachability` (Batch 4) and `web-passive` (Batch 5, six passive checks it runs off the reachability scanner's one response) — see [security-model.md](security-model.md).                                                                                                                |
+| `packages/scanner-core` | The scanner plugin framework: `ScannerPlugin`/`ScannerContext`, `AssessmentScope` validation, SSRF policy, the DNS-rebinding-resistant `SafeHttpClient` (Batch 4); `HttpObservation`, `PassiveCheck`, and the passive-check runner (Batch 5); `ReportDiscoveredUrlInput` (Batch 6). No database access, no HTTP server.                   |
+| `packages/scanners/*`   | Individual scanner plugins/check packages. `http-reachability` (Batch 4, still standalone/tested but no longer used by the worker); `web-passive` (Batch 5, six passive checks); `web-discovery` (Batch 6, the active WEB/WEB scanner — crawls + runs `web-passive` per fetched page) — see [security-model.md](security-model.md).       |
 | `apps/worker`           | Consumes `assessment-jobs`, loads authoritative state from `packages/db`, selects and runs applicable scanner plugins via `packages/scanner-core`, persists findings/evidence. The only app that makes outbound requests to a target.                                                                                                     |
 | `apps/report-worker`    | BullMQ consumer and process lifecycle. Still placeholder job processing — no report generation yet.                                                                                                                                                                                                                                       |
 

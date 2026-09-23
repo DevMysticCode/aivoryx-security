@@ -2,15 +2,21 @@
 
 Batch 4 added the first real scanner and the outbound-request pipeline: an
 explicit technical scope, SSRF protection, a DNS-rebinding-resistant safe
-HTTP client, and one non-invasive HTTP reachability scanner. Batch 5 turns
+HTTP client, and one non-invasive HTTP reachability scanner. Batch 5 turned
 that single controlled HTTP observation into a **passive web security
 analysis engine** — deterministic, evidence-backed findings (security
 headers, cookie security, CORS, information disclosure, transport, HTTP
-behavior) derived from the same one request, never from additional target
-traffic. Batch 3 implemented the _authorization and domain-model_ half of
-this document (Asset, Authorization confirmation, Assessment, compatibility
-validation). No vulnerability-detection, exploitation, crawling, fuzzing, or
-active testing of any kind exists — see "Explicitly out of scope" below.
+behavior) derived from the same request, never from additional target
+traffic. Batch 6 adds **scope-aware discovery**: the reachability request's
+response is now also parsed for links/resources/forms, and in-scope pages
+are crawled (bounded BFS, conservative defaults) so passive analysis runs
+across the discovered attack surface, not just the seed URL — still through
+the exact same `SafeHttpClient`, still zero additional risk surface. Batch 3
+implemented the _authorization and domain-model_ half of this document
+(Asset, Authorization confirmation, Assessment, compatibility validation).
+No vulnerability-detection, exploitation, form submission, JavaScript
+execution, or active testing of any kind exists — see "Explicitly out of
+scope" below.
 
 ## The model
 
@@ -316,12 +322,94 @@ deliberately keyed `name` rather than `cookie` specifically because that redacti
 pattern treats any key _containing_ "cookie" as secret-shaped — the safer, more
 precise choice over trying to special-case the pattern.
 
+## Scope-aware web discovery (implemented, Batch 6)
+
+`packages/scanners/web-discovery` turns the single reachability fetch into a bounded
+breadth-first crawl of the authorized application. Its `webDiscoveryScanner`
+**supersedes** Batch 4's `httpReachabilityScanner` in the worker's active registry
+(`apps/worker/src/index.ts`) for WEB/WEB assessments — only one scanner runs, so the
+seed is still fetched exactly once, never twice. `packages/scanners/http-reachability`
+itself is untouched and remains independently buildable/testable.
+
+- **URL normalization** (`url-normalize.ts`): lowercases the hostname, strips the
+  scheme's default port, removes the fragment, and normalizes an empty path to `/`.
+  Dot-segments are collapsed by WHATWG URL resolution. The query string is **never**
+  touched — `/product?id=1` and `/product?id=2` are always distinct discovered URLs,
+  since a query string can encode an entirely different application route. A real
+  trailing slash (`/foo/`) is left alone; only the no-path-at-all case is normalized,
+  since collapsing `/foo/` to `/foo` could change which resource a server returns.
+- **Scope remains authoritative, not same-origin.** Every discovered URL is
+  normalized, then checked against the assessment's `AssessmentScope` (the same
+  `checkUrlAgainstScope` Batch 4 built) **before** it is ever added to the crawl
+  queue — an out-of-scope URL is recorded as a `URL_SKIPPED_OUT_OF_SCOPE` event and
+  never requested. The one deliberate exception: the **seed** URL is queued directly,
+  bypassing that pre-filter, specifically so that an out-of-scope seed reaches
+  `SafeHttpClient`'s own validation and throws a loud `ScopeViolationError` (a
+  permanent worker failure) rather than the crawler silently doing nothing and the
+  assessment completing with zero findings.
+- **Redirects** are still handled entirely by `SafeHttpClient` — the crawler
+  implements no redirect logic of its own. When a fetch's `finalUrl` differs from
+  what was linked (a redirect happened), the crawler additionally records the final
+  destination as its own discovery (`discoveryMethod: 'REDIRECT'`), so the persisted
+  attack surface reflects what was actually reached.
+- **HTML parsing** uses `htmlparser2` (a tolerant SAX-style parser, not a browser) —
+  malformed markup is parsed best-effort, never thrown on. **No JavaScript is ever
+  executed and no browser is ever launched** — `<script src>` is recorded as a
+  resource reference only; the referenced file is never fetched, parsed, or
+  executed. JavaScript-generated routes/links are consequently invisible to this
+  crawler — a known limitation, not an oversight.
+- **Resources vs. pages.** `<a>`/`<area>`/`<link>`/`<iframe>`/`<frame>` are
+  navigational — in-scope targets are queued for a further fetch (`depth + 1`).
+  `<script>`/`<img>`/`<source>`/`<video>`/`<audio>`/`<object>` are recorded as
+  discovered resources **without ever being fetched** — no request budget is spent
+  confirming a `.js`/image/etc. actually exists; only navigable pages consume a
+  crawl request.
+- **Forms are metadata-only, never submitted.** `extractFromHtml` records a form's
+  action/method/input-names-and-types while parsing; `SafeHttpMethod` is typed as
+  `'GET' | 'HEAD'` only, so the crawler is structurally incapable of issuing a
+  POST/PUT/PATCH/DELETE request even if it tried.
+- **robots.txt/sitemap.xml** (`robots.ts`/`sitemap.ts`) are off by default
+  (`CrawlLimits.robotsEnabled`/`sitemapEnabled`) since they're explicitly optional
+  and each adds a request; when enabled, a `Sitemap:` directive or `/sitemap.xml` is
+  fetched through `SafeHttpClient` like any other URL, and **every URL it names is
+  still scope-checked before being queued** — robots.txt is parsed only for
+  `Sitemap:` lines (Disallow/Allow are never enforced; robots.txt is explicitly not a
+  security boundary and can never expand what the assessment's scope allows).
+  Sitemap `<loc>` extraction is capped at `maxSitemapUrls` and never follows a
+  sitemap-of-sitemaps.
+- **Explicit, centrally-enforced limits** (`CrawlLimits`, conservative defaults):
+  `maxDepth: 2`, `maxUrls: 50`, `maxTotalRequests: 60`, `maxConcurrentRequests: 3`,
+  `requestsPerSecond: 5`, `maxSitemapUrls: 100`, `maxLinksPerPage: 50`. Concurrency
+  and rate limiting are enforced by one shared `RequestScheduler` (`rate-limiter.ts`)
+  across the whole crawl, not per-URL. Hitting a limit stops scheduling further work
+  in that category and is recorded (`limitsHit`); it never silently keeps going.
+- **No authenticated crawling.** The crawler carries no session/cookie jar and never
+  replays a `Set-Cookie` it observes back to the target — every request is anonymous,
+  exactly like the underlying `SafeHttpClient`.
+- **Persistence** (`discovered_urls` table, Batch 6 migration): normalized URL,
+  source URL, type, discovery method, depth, status/content-type/response size where
+  fetched, and type-specific metadata (form input names/types only). Deduplicated at
+  the database level on `(assessment_id, url, url_type)` — the same URL can
+  legitimately appear once as a `PAGE` and, separately, as a `FORM_ACTION`, but never
+  twice in the same role. Sensitive-looking query parameter **values** (token,
+  password, api_key, secret, auth, session, credential) are redacted before a URL is
+  ever persisted (`redactSensitiveQueryParams`) — the real, unredacted URL is what's
+  actually used to make the request; only the stored copy is redacted. No cookie
+  values, Authorization headers, or response bodies are ever persisted.
+- **Findings continue to come from the same fetch.** Every fetched HTML page (not
+  just the seed) is passed through `buildHttpObservation`/`runPassiveChecks` exactly
+  once — the crawler never re-fetches a page to run passive analysis separately from
+  discovery parsing. Proven by request-count assertions in both
+  `packages/scanners/web-discovery/src/crawler.test.ts` and
+  `apps/worker/src/assessment-processor.integration.test.ts`.
+
 ## Explicitly out of scope for this document
 
 Vulnerability detection/exploitation of any kind (SQLi, XSS, SSRF exploitation,
 auth bypass, brute force, fuzzing, parameter discovery, form submission or any
-mutating request), crawling, browser automation/JS execution, API fuzzing/
-OpenAPI-driven testing, active CORS testing (sending an attacker-controlled `Origin`
-header), mobile scanning, AI/LLM-generated analysis of any kind, and report
-generation. Those remain future batches; this document is updated as each piece
-actually lands, not written once and left stale.
+mutating request), authenticated/session-aware crawling, JavaScript execution or
+browser automation of any kind, API fuzzing/OpenAPI-driven testing, active CORS
+testing (sending an attacker-controlled `Origin` header), mobile scanning,
+AI/LLM-generated analysis of any kind, and report generation. Those remain future
+batches; this document is updated as each piece actually lands, not written once and
+left stale.
