@@ -264,6 +264,9 @@ async function persistFinding(
       confidence: input.confidence,
       category: input.category,
       target: input.target,
+      key: input.key,
+      remediation: input.remediation ?? null,
+      references: input.references ?? [],
       fingerprint,
     })
     .onConflictDoNothing({ target: [schema.findings.assessmentId, schema.findings.fingerprint] })

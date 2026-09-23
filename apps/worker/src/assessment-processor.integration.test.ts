@@ -48,6 +48,8 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
   let queue: Queue<AssessmentJobData>;
   let worker: Worker<AssessmentJobData>;
   let fixtureServer: { server: Server; port: number };
+  let passiveFixtureServer: { server: Server; port: number };
+  let passiveFixtureRequestCount = 0;
   let organizationId: string;
   let projectId: string;
 
@@ -96,6 +98,22 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       res.end('ok');
     });
 
+    // A single deterministic response exercising every passive-check
+    // category in one request: missing security headers, an insecure
+    // cookie, a risky CORS configuration, and a technology-disclosure
+    // header. See the REQUIRED END-TO-END DEMONSTRATION.
+    passiveFixtureServer = await startServer((_req, res) => {
+      passiveFixtureRequestCount += 1;
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        Server: 'nginx/1.24.0',
+        'Set-Cookie': 'session=abc123; Path=/',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Credentials': 'true',
+      });
+      res.end('<html></html>');
+    });
+
     const processor = createAssessmentJobProcessor({
       db: client.db,
       logger: noopLogger() as unknown as Parameters<
@@ -124,6 +142,7 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     await worker.close();
     await queue.close();
     fixtureServer.server.close();
+    passiveFixtureServer.server.close();
     await connection.quit();
     await client.close();
   });
@@ -132,11 +151,17 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     overrides: {
       authorizationConfirmed?: boolean;
       baseUrl?: string;
-      assetType?: 'WEB' | 'ANDROID';
+      assetType?: 'WEB' | 'API' | 'ANDROID' | 'IOS';
     } = {},
   ) {
     const assetType = overrides.assetType ?? 'WEB';
     const baseUrl = overrides.baseUrl ?? `http://127.0.0.1:${fixtureServer.port}/`;
+    const config =
+      assetType === 'WEB' || assetType === 'API'
+        ? { baseUrl }
+        : assetType === 'ANDROID'
+          ? { packageName: 'com.example.smoke' }
+          : { bundleId: 'com.example.smoke' };
     const [asset] = await client.db
       .insert(schema.assets)
       .values({
@@ -144,7 +169,7 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
         assetType,
         name: 'Test asset',
         authorizationConfirmed: overrides.authorizationConfirmed ?? true,
-        config: assetType === 'WEB' ? { baseUrl } : { packageName: 'com.example.smoke' },
+        config,
       })
       .returning();
     return asset!;
@@ -153,7 +178,11 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
   async function createAssessment(
     assetId: string,
     config: { baseUrl: string },
-    options: { scope?: AssessmentScope; assessmentType?: 'WEB' | 'ANDROID_STATIC' } = {},
+    options: {
+      scope?: AssessmentScope;
+      assessmentType?:
+        'WEB' | 'API' | 'ANDROID_STATIC' | 'ANDROID_DYNAMIC' | 'IOS_STATIC' | 'IOS_DYNAMIC';
+    } = {},
   ) {
     const assessmentType = options.assessmentType ?? 'WEB';
     const [assessment] = await client.db
@@ -207,14 +236,17 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       .select()
       .from(schema.findings)
       .where(eq(schema.findings.assessmentId, assessment.id));
-    expect(findings).toHaveLength(1);
-    expect(findings[0]?.severity).toBe('INFO');
-    expect(findings[0]?.category).toBe('reachability');
+    // The fixture has no security headers at all, so passive checks also
+    // report findings alongside reachability — see the dedicated end-to-end
+    // demonstration test below for exact category/key assertions.
+    expect(findings.length).toBeGreaterThan(0);
+    const reachable = findings.find((f) => f.category === 'reachability' && f.key === 'reachable');
+    expect(reachable?.severity).toBe('INFO');
 
     const evidenceRows = await client.db
       .select()
       .from(schema.evidence)
-      .where(eq(schema.evidence.findingId, findings[0]!.id));
+      .where(eq(schema.evidence.findingId, reachable!.id));
     expect(evidenceRows).toHaveLength(1);
     expect(JSON.stringify(evidenceRows[0]?.data)).not.toContain('Authorization');
   });
@@ -307,6 +339,59 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     expect(jobRow?.status).toBe('FAILED');
   });
 
+  it.each([
+    { assetType: 'API', assessmentType: 'API' },
+    { assetType: 'ANDROID', assessmentType: 'ANDROID_STATIC' },
+    { assetType: 'ANDROID', assessmentType: 'ANDROID_DYNAMIC' },
+    { assetType: 'IOS', assessmentType: 'IOS_STATIC' },
+    { assetType: 'IOS', assessmentType: 'IOS_DYNAMIC' },
+  ] as const)(
+    'fails a $assessmentType assessment (no scanner implements it) as a permanent UNSUPPORTED_ASSESSMENT_TYPE failure, never COMPLETED',
+    async ({ assetType, assessmentType }) => {
+      const emptyScope: AssessmentScope = {
+        schemes: [],
+        hosts: [],
+        ports: [],
+        allowedPathPrefixes: [],
+        exclusions: { hosts: [], paths: [] },
+      };
+      const asset = await createAsset({ assetType });
+      const { assessment, job } = await createAssessment(
+        asset.id,
+        { baseUrl: '' },
+        { assessmentType, scope: emptyScope },
+      );
+
+      await queue.add('assessment', {
+        assessmentJobId: job.id,
+        assessmentId: assessment.id,
+        scannerName: assessmentType,
+      });
+
+      const finalAssessment = await runAndWaitForTerminalStatus(assessment.id);
+      // The Batch 4 invariant: COMPLETED means the assessment actually ran.
+      // No currently-unsupported type may ever reach COMPLETED.
+      expect(finalAssessment?.status).not.toBe('COMPLETED');
+      expect(finalAssessment?.status).toBe('FAILED');
+      expect(finalAssessment?.errorMessage).toMatch(/UNSUPPORTED_ASSESSMENT_TYPE/);
+
+      const findings = await client.db
+        .select()
+        .from(schema.findings)
+        .where(eq(schema.findings.assessmentId, assessment.id));
+      expect(findings).toHaveLength(0);
+
+      const [jobRow] = await client.db
+        .select()
+        .from(schema.assessmentJobs)
+        .where(eq(schema.assessmentJobs.id, job.id))
+        .limit(1);
+      // Permanent failure: exactly one attempt, never retried into a loop.
+      expect(jobRow?.attemptCount).toBe(1);
+      expect(jobRow?.status).toBe('FAILED');
+    },
+  );
+
   it('skips a duplicate job delivery for an assessment that already reached a terminal state', async () => {
     const asset = await createAsset();
     const { assessment, job } = await createAssessment(asset.id, {
@@ -320,8 +405,13 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
     });
     await runAndWaitForTerminalStatus(assessment.id);
 
+    const findingsAfterFirstRun = await client.db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.assessmentId, assessment.id));
+
     // A second, duplicate delivery for the same (now-COMPLETED) assessment
-    // must be a safe no-op, not re-run the scanner or create a second finding.
+    // must be a safe no-op, not re-run the scanner or create any new finding.
     await queue.add('assessment', {
       assessmentJobId: job.id,
       assessmentId: assessment.id,
@@ -333,6 +423,92 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       .select()
       .from(schema.findings)
       .where(eq(schema.findings.assessmentId, assessment.id));
-    expect(findings).toHaveLength(1);
+    expect(findings).toHaveLength(findingsAfterFirstRun.length);
   });
+
+  it('REQUIRED END-TO-END DEMONSTRATION: WEB assessment runs reachability + passive checks off ONE request and persists deterministic findings', async () => {
+    const baseUrl = `http://127.0.0.1:${passiveFixtureServer.port}/`;
+    const asset = await createAsset({ baseUrl });
+    const { assessment, job } = await createAssessment(asset.id, { baseUrl });
+
+    const requestsBefore = passiveFixtureRequestCount;
+
+    await queue.add('assessment', {
+      assessmentJobId: job.id,
+      assessmentId: assessment.id,
+      scannerName: 'WEB',
+    });
+
+    const finalAssessment = await runAndWaitForTerminalStatus(assessment.id);
+    expect(finalAssessment?.status).toBe('COMPLETED');
+
+    // Exactly one outbound request for the ENTIRE assessment — reachability
+    // plus every passive check together. See Part Y.
+    expect(passiveFixtureRequestCount - requestsBefore).toBe(1);
+
+    const findings = await client.db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.assessmentId, assessment.id));
+    const byKey = new Map(findings.map((f) => [f.key, f]));
+
+    function byCategoryKey(category: string, key: string) {
+      return findings.find((f) => f.category === category && f.key === key);
+    }
+
+    // Reachability (Batch 4, unchanged).
+    expect(findings.some((f) => f.category === 'reachability' && f.key === 'reachable')).toBe(true);
+
+    // Security headers: none were set by the fixture, so every "missing" finding fires.
+    expect(byCategoryKey('security-headers', 'csp-missing')).toBeDefined();
+    expect(byCategoryKey('security-headers', 'hsts-missing')).toBeUndefined(); // fixture is http, HSTS N/A
+    expect(byCategoryKey('security-headers', 'xcto-missing')).toBeDefined();
+    expect(byCategoryKey('security-headers', 'referrer-policy-missing')).toBeDefined();
+    expect(byCategoryKey('security-headers', 'permissions-policy-missing')).toBeDefined();
+    expect(byCategoryKey('security-headers', 'framing-protection-missing')).toBeDefined();
+
+    // Cookies: the fixture's "session" cookie has no Secure/HttpOnly/SameSite.
+    const cookieMissingHttpOnly = byCategoryKey('cookies', 'cookie:session:missing-httponly');
+    expect(cookieMissingHttpOnly).toBeDefined();
+    expect(cookieMissingHttpOnly?.severity).toBe('MEDIUM'); // "session" matches the sensitive-name heuristic
+    // The fixture is plain HTTP, so "missing Secure" is not flagged (Secure is HTTPS-only guidance).
+    expect(byCategoryKey('cookies', 'cookie:session:missing-secure')).toBeUndefined();
+    // No cookie value is ever persisted.
+    expect(JSON.stringify(findings)).not.toContain('abc123');
+
+    // CORS: wildcard origin + credentials is a real, directly-observed misconfiguration.
+    const cors = byCategoryKey('cors', 'cors-wildcard-with-credentials');
+    expect(cors).toBeDefined();
+    expect(cors?.severity).toBe('MEDIUM');
+
+    // Information disclosure: the fixture's Server header.
+    const disclosure = byCategoryKey('information-disclosure', 'disclosure:server');
+    expect(disclosure).toBeDefined();
+    expect(disclosure?.severity).toBe('INFO');
+
+    // Transport: the target itself is plain HTTP.
+    expect(byCategoryKey('transport', 'http-target')).toBeDefined();
+
+    // Every finding has the required quality fields (Part C) and a deterministic fingerprint.
+    for (const finding of findings) {
+      expect(finding.title.length).toBeGreaterThan(0);
+      expect(finding.description.length).toBeGreaterThan(0);
+      expect(finding.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(byKey.size).toBe(findings.length); // fingerprints/keys are all unique within this assessment
+
+    // Evidence exists for every finding that declared it, and is sanitized/size-bounded.
+    const evidenceRows = await client.db
+      .select()
+      .from(schema.evidence)
+      .where(
+        eq(
+          schema.evidence.findingId,
+          findings.find((f) => f.key === 'cookie:session:missing-httponly')!.id,
+        ),
+      );
+    expect(evidenceRows).toHaveLength(1);
+    expect(evidenceRows[0]?.data).toMatchObject({ name: 'session' });
+    expect(JSON.stringify(evidenceRows[0]?.data)).not.toContain('abc123');
+  }, 15_000);
 });

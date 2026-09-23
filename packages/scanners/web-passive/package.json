@@ -1,5 +1,5 @@
 {
-  "name": "@aivoryx/scanner-http-reachability",
+  "name": "@aivoryx/scanner-web-passive",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@aivoryx/scanner-core": "workspace:*",
-    "@aivoryx/scanner-web-passive": "workspace:*",
     "@aivoryx/shared-types": "workspace:*"
   },
   "devDependencies": {

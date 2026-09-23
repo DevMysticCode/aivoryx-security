@@ -524,6 +524,19 @@ export const findings = pgTable(
     category: text('category').notNull(),
     status: findingStatusEnum('status').$type<FindingStatus>().notNull().default('OPEN'),
     target: text('target').notNull(),
+    // The short, stable identifier the reporting check gave this specific
+    // observation (e.g. 'csp-missing', 'cookie:session:missing-secure') —
+    // the passive-check identity referenced by Part W, distinct from the
+    // opaque `fingerprint` hash. Useful for filtering/debugging without
+    // recomputing a fingerprint.
+    key: text('key').notNull(),
+    // Deterministic, static guidance on what to change — never AI-generated. Batch 5 Part M.
+    remediation: text('remediation'),
+    // Stable, genuinely relevant reference URLs/identifiers. Batch 5 Part N.
+    references: jsonb('references')
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     // Deterministic dedup key (assessment + scanner + category + normalized
     // target + finding key). Enforced unique per assessment so a retried job
     // can never create a duplicate row — see Part O.

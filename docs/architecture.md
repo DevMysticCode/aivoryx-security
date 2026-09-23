@@ -19,11 +19,15 @@ Batch 1 established the runnable skeleton of this diagram: config, logging, the
 database/queue clients, health/readiness checks, and process lifecycle. Batch 2 added
 the identity/tenancy/billing foundation (organizations, membership, API keys, audit).
 Batch 3 added real human authentication and the security-assessment domain model
-(projects → assets → assessments → assessment jobs). Batch 4 adds the first real
+(projects → assets → assessments → assessment jobs). Batch 4 added the first real
 scanner engine: an explicit assessment scope, SSRF protection, a DNS-rebinding-
 resistant safe HTTP client, a scanner plugin architecture, and one non-invasive HTTP
 reachability scanner — `apps/worker` now actually executes assessments end to end
-(QUEUED → RUNNING → COMPLETED/FAILED) instead of only logging and acknowledging. See
+(QUEUED → RUNNING → COMPLETED/FAILED) instead of only logging and acknowledging.
+Batch 5 adds a passive web security analysis engine on top: the reachability
+scanner's single HTTP response now also feeds a registry of deterministic passive
+checks (security headers, cookies, CORS, information disclosure, transport, HTTP
+behavior) — still exactly one outbound request per assessment. See
 [security-model.md](security-model.md) for the full detail.
 
 ## Domain model
@@ -66,8 +70,8 @@ Organization
 | `packages/auth`         | Authentication/authorization **primitives only**: principal types, roles, permissions, the role→permission table, password hashing (Argon2id), session-token crypto, API-key crypto. No database access, no HTTP, no domain logic — see [authorization.md](authorization.md).                                                             |
 | `packages/billing`      | Provider-agnostic billing **domain types and pure functions**: plan catalog, seat-usage math, the `BillingProvider` interface. Untouched in Batch 3 beyond what Batch 2 already established — see [billing.md](billing.md).                                                                                                               |
 | `apps/api`              | HTTP concerns: routing, request validation (zod), the dual session/API-key auth context, and the service layer (`apps/api/src/services/*`) that combines authorization checks with `packages/db` queries and `packages/queue` enqueues. **Never makes a target HTTP request itself.**                                                     |
-| `packages/scanner-core` | The scanner plugin framework (Batch 4): `ScannerPlugin`/`ScannerContext`, `AssessmentScope` validation, SSRF policy, the DNS-rebinding-resistant `SafeHttpClient`, finding-fingerprint deduplication. No database access, no HTTP server.                                                                                                 |
-| `packages/scanners/*`   | Individual scanner plugins. Only `http-reachability` exists (Batch 4) — see [security-model.md](security-model.md).                                                                                                                                                                                                                       |
+| `packages/scanner-core` | The scanner plugin framework: `ScannerPlugin`/`ScannerContext`, `AssessmentScope` validation, SSRF policy, the DNS-rebinding-resistant `SafeHttpClient` (Batch 4); `HttpObservation`, `PassiveCheck`, and the passive-check runner (Batch 5). No database access, no HTTP server.                                                         |
+| `packages/scanners/*`   | Individual scanner plugins/check packages. `http-reachability` (Batch 4) and `web-passive` (Batch 5, six passive checks it runs off the reachability scanner's one response) — see [security-model.md](security-model.md).                                                                                                                |
 | `apps/worker`           | Consumes `assessment-jobs`, loads authoritative state from `packages/db`, selects and runs applicable scanner plugins via `packages/scanner-core`, persists findings/evidence. The only app that makes outbound requests to a target.                                                                                                     |
 | `apps/report-worker`    | BullMQ consumer and process lifecycle. Still placeholder job processing — no report generation yet.                                                                                                                                                                                                                                       |
 

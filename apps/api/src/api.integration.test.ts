@@ -704,6 +704,150 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
     });
   });
 
+  describe('findings', () => {
+    async function setupAssessmentWithFinding(label: string) {
+      const owner = await registerAndLogin(label);
+      const org = await createOrgAsOwner(owner.sessionCookie, label);
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: label, slug: `${label}-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+      const assetResponse = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: {
+          assetType: 'WEB',
+          name: `${label} asset`,
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      const assetId = assetResponse.json().asset.id as string;
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...auth,
+        payload: { authorizationConfirmed: true },
+      });
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      const assessmentId = created.json().assessment.id as string;
+
+      // The worker isn't running in this test — insert a finding/evidence
+      // row directly (as apps/worker would) to test the API's read path and
+      // tenant isolation independently of scanner execution.
+      const [finding] = await client.db
+        .insert(schema.findings)
+        .values({
+          assessmentId,
+          scanner: 'http-reachability',
+          title: 'No Content-Security-Policy header',
+          description: 'test finding',
+          severity: 'LOW',
+          confidence: 'HIGH',
+          category: 'security-headers',
+          target: 'https://example.com/',
+          key: 'csp-missing',
+          remediation: 'Add a CSP header.',
+          references: ['https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP'],
+          fingerprint: `test-${label}-${Date.now()}`,
+        })
+        .returning();
+      await client.db.insert(schema.evidence).values({
+        findingId: finding!.id,
+        data: { header: 'Content-Security-Policy', present: false },
+      });
+
+      return { auth, assessmentId, findingId: finding!.id };
+    }
+
+    it('lists findings for an assessment the caller can access', async () => {
+      const { auth, assessmentId } = await setupAssessmentWithFinding('finding-list');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/findings`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().findings).toHaveLength(1);
+      expect(response.json().findings[0].category).toBe('security-headers');
+    }, 15_000);
+
+    it('retrieves a single finding with its evidence', async () => {
+      const { auth, findingId } = await setupAssessmentWithFinding('finding-detail');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/findings/${findingId}`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.finding.id).toBe(findingId);
+      expect(body.finding.remediation).toBe('Add a CSP header.');
+      expect(body.evidence).toHaveLength(1);
+      expect(body.evidence[0].data).toEqual({ header: 'Content-Security-Policy', present: false });
+    }, 15_000);
+
+    it('an organization cannot read another organization finding by id (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('finding-iso-a');
+      const { findingId } = await setupAssessmentWithFinding('finding-iso-b');
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/findings/${findingId}`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+      });
+      expect(response.statusCode).toBe(404);
+    }, 15_000);
+
+    it('an organization cannot list another organization assessment findings (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('finding-list-iso-a');
+      const { assessmentId } = await setupAssessmentWithFinding('finding-list-iso-b');
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/findings`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+      });
+      expect(response.statusCode).toBe(404);
+    }, 15_000);
+
+    it('exposes no route to create, update, or delete a finding', async () => {
+      const { auth, findingId } = await setupAssessmentWithFinding('finding-immutable');
+
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/v1/findings',
+        ...auth,
+        payload: {},
+      });
+      expect(create.statusCode).toBe(404);
+
+      const update = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/findings/${findingId}`,
+        ...auth,
+        payload: { status: 'RESOLVED' },
+      });
+      expect(update.statusCode).toBe(404);
+
+      const del = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/findings/${findingId}`,
+        ...auth,
+      });
+      expect(del.statusCode).toBe(404);
+    }, 15_000);
+  });
+
   describe('legacy API-key path (Batch 2 behavior preserved)', () => {
     it('an API key still authenticates and is tenant-isolated', async () => {
       const owner = await registerAndLogin('legacy-key-owner');

@@ -30,6 +30,10 @@ export interface ReportFindingInput {
   target: string;
   /** Structured, already-sanitized evidence. Never pass raw secrets/cookies/auth headers — see Part N. */
   evidence?: Record<string, unknown>;
+  /** Deterministic, static guidance on what to change — never AI-generated. See Batch 5 Part M. */
+  remediation?: string;
+  /** Stable, genuinely relevant reference identifiers/URLs (e.g. an OWASP or MDN page). See Batch 5 Part N. */
+  references?: string[];
 }
 
 /**

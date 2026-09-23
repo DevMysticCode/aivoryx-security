@@ -33,6 +33,10 @@ export interface SafeHttpResponse {
   finalUrl: string;
   status: number;
   headers: Record<string, string>;
+  /** Raw Set-Cookie header instances, one per cookie — never joined with ',' (which would corrupt Expires attributes and multi-cookie parsing) — see Node's special-cased `set-cookie` header array. */
+  setCookieHeaders: string[];
+  /** TLS protocol version (e.g. 'TLSv1.3'), when available for an https response. Never includes certificate/key material. */
+  tlsProtocol: string | null;
   httpVersion: string;
   redirectCount: number;
   hops: SafeHttpHop[];
@@ -95,6 +99,8 @@ export class SafeHttpClient {
           finalUrl: normalized,
           status: result.status,
           headers: result.headers,
+          setCookieHeaders: result.setCookieHeaders,
+          tlsProtocol: result.tlsProtocol,
           httpVersion: result.httpVersion,
           redirectCount,
           hops,
@@ -136,6 +142,8 @@ export class SafeHttpClient {
   ): Promise<{
     status: number;
     headers: Record<string, string>;
+    setCookieHeaders: string[];
+    tlsProtocol: string | null;
     httpVersion: string;
     bodyBytesRead: number;
     bodyTruncated: boolean;
@@ -189,8 +197,15 @@ export class SafeHttpClient {
         });
       }, connectTimeoutMs);
 
+      let tlsProtocol: string | null = null;
       req.once('socket', (socket) => {
         socket.once('connect', () => clearTimeout(connectTimer));
+        socket.once('secureConnect', () => {
+          const getProtocol = (socket as unknown as { getProtocol?: () => string | null })
+            .getProtocol;
+          tlsProtocol =
+            typeof getProtocol === 'function' ? (getProtocol.call(socket) ?? null) : null;
+        });
       });
 
       req.once('timeout', () => {
@@ -221,9 +236,19 @@ export class SafeHttpClient {
         }
 
         const headers: Record<string, string> = {};
+        let setCookieHeaders: string[] = [];
         for (const [key, value] of Object.entries(res.headers)) {
           if (value === undefined) continue;
-          headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : value;
+          const lowerKey = key.toLowerCase();
+          if (lowerKey === 'set-cookie') {
+            // Node returns 'set-cookie' as a string[] specifically because
+            // joining multiple cookies with ',' would corrupt parsing (a
+            // cookie's Expires attribute itself contains commas). Preserve
+            // each instance separately rather than flattening into `headers`.
+            setCookieHeaders = Array.isArray(value) ? value : [value];
+            continue;
+          }
+          headers[lowerKey] = Array.isArray(value) ? value.join(', ') : value;
         }
 
         let bytesRead = 0;
@@ -247,6 +272,8 @@ export class SafeHttpClient {
             resolve({
               status: res.statusCode ?? 0,
               headers,
+              setCookieHeaders,
+              tlsProtocol,
               httpVersion: res.httpVersion,
               bodyBytesRead: bytesRead,
               bodyTruncated: truncated,
@@ -260,6 +287,8 @@ export class SafeHttpClient {
               resolve({
                 status: res.statusCode ?? 0,
                 headers,
+                setCookieHeaders,
+                tlsProtocol,
                 httpVersion: res.httpVersion,
                 bodyBytesRead: bytesRead,
                 bodyTruncated: true,

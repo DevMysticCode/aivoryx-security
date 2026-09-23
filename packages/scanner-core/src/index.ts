@@ -16,6 +16,17 @@ export type {
   SafeHttpMethod,
 } from './http-client.js';
 
+export { buildHttpObservation, parseSetCookieHeader } from './http-observation.js';
+export type {
+  HttpObservation,
+  HttpObservationRedirectHop,
+  HttpCookieObservation,
+  SameSiteValue,
+} from './http-observation.js';
+
+export { createPassiveCheckRegistry, runPassiveChecks } from './passive-check.js';
+export type { PassiveCheck, PassiveCheckContext } from './passive-check.js';
+
 export {
   ScopeViolationError,
   SsrfViolationError,

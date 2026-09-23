@@ -68,6 +68,15 @@ export function registerAssessmentRoutes(
     return { findings };
   });
 
+  app.get('/api/v1/findings/:findingId', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { findingId } = request.params as { findingId: string };
+
+    const result = await assessmentsService.getFindingById(identityFromRequest(request), findingId);
+    if (!result) return notFound(reply, request.id);
+    return result;
+  });
+
   app.post('/api/v1/assessments/:assessmentId/cancel', async (request, reply) => {
     requireAnyIdentity(request);
     const { assessmentId } = request.params as { assessmentId: string };

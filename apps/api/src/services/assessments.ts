@@ -96,6 +96,30 @@ async function getAssessmentContext(
   return { assessment: row.assessment, project: row.project, principal };
 }
 
+async function getFindingContext(
+  deps: AssessmentsServiceDeps,
+  identity: RequestIdentity,
+  findingId: string,
+) {
+  const [row] = await deps.db
+    .select({ finding: schema.findings, assessment: schema.assessments, project: schema.projects })
+    .from(schema.findings)
+    .innerJoin(schema.assessments, eq(schema.assessments.id, schema.findings.assessmentId))
+    .innerJoin(schema.projects, eq(schema.projects.id, schema.assessments.projectId))
+    .where(eq(schema.findings.id, findingId))
+    .limit(1);
+  if (!row) return null;
+
+  const principal = await resolveTenantPrincipalForOrganization(
+    identity,
+    row.project.organizationId,
+    deps.db,
+  );
+  if (!principal) return null;
+
+  return { finding: row.finding, assessment: row.assessment, project: row.project, principal };
+}
+
 export function createAssessmentsService(deps: AssessmentsServiceDeps) {
   return {
     async list(identity: RequestIdentity, projectId: string) {
@@ -241,6 +265,26 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
         .select()
         .from(schema.findings)
         .where(eq(schema.findings.assessmentId, assessmentId));
+    },
+
+    /**
+     * Returns null both when the finding does not exist and when the caller
+     * has no access to it (tenant isolation) — never a 403 that would
+     * confirm existence of another organization's finding. Findings are
+     * scanner-generated: this API exposes read access only, never
+     * create/update/delete (Part T).
+     */
+    async getFindingById(identity: RequestIdentity, findingId: string) {
+      const context = await getFindingContext(deps, identity, findingId);
+      if (!context) return null;
+      if (!hasPermission(context.principal, 'finding:read')) return null;
+
+      const evidence = await deps.db
+        .select()
+        .from(schema.evidence)
+        .where(eq(schema.evidence.findingId, findingId));
+
+      return { finding: context.finding, evidence };
     },
 
     async cancel(identity: RequestIdentity, assessmentId: string, requestContext: RequestContext) {

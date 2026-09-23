@@ -7,9 +7,5 @@
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [
-    { "path": "../../scanner-core" },
-    { "path": "../web-passive" },
-    { "path": "../../shared-types" }
-  ]
+  "references": [{ "path": "../../scanner-core" }, { "path": "../../shared-types" }]
 }

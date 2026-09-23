@@ -2,11 +2,13 @@
 
 Application security assessment platform — monorepo.
 
-**Status:** Batch 4 (Security Engine Foundation) complete. Human identity, the full
+**Status:** Batch 5 (Passive Web Security Engine) complete. Human identity, the full
 Project → Asset → Assessment → AssessmentJob domain model, an explicit assessment
 scope, SSRF protection, a DNS-rebinding-resistant safe HTTP client, a scanner
-plugin architecture, and one non-invasive scanner (HTTP reachability) are
-implemented — `apps/worker` now actually executes assessments end to end. **No
+plugin architecture, and a passive web security analysis engine (security headers,
+cookies, CORS, information disclosure, transport, HTTP behavior — all derived from
+one controlled HTTP request) are implemented — `apps/worker` now actually executes
+assessments end to end and produces deterministic, evidence-backed findings. **No
 vulnerability detection/exploitation, crawling, or mobile scanning exists yet** —
 see [docs/security-model.md](docs/security-model.md) for what's implemented versus
 still future.
@@ -32,8 +34,10 @@ still future.
   billing         Provider-agnostic billing domain: plan catalog, seat math,
                   BillingProvider interface (no live payment integration)
   scanner-core    ScannerPlugin interface, AssessmentScope/SSRF validation,
-                  DNS-rebinding-resistant SafeHttpClient, finding deduplication
-  scanners        Individual scanner plugin packages: http-reachability (Batch 4)
+                  DNS-rebinding-resistant SafeHttpClient, finding deduplication,
+                  HttpObservation model + PassiveCheck registry/runner
+  scanners        http-reachability (Batch 4) + web-passive (Batch 5: security-headers,
+                  cookies, cors, information-disclosure, transport, http-behavior)
   ai-core         AIProvider interface + providers (optional, not wired in yet)
   report-core     HTML/PDF report templating
 /infrastructure

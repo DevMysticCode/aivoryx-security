@@ -1,12 +1,16 @@
 # Security model for assessments
 
-Batch 4 adds the first real scanner and the outbound-request pipeline: an
+Batch 4 added the first real scanner and the outbound-request pipeline: an
 explicit technical scope, SSRF protection, a DNS-rebinding-resistant safe
-HTTP client, and one non-invasive HTTP reachability scanner. Batch 3
-implemented the _authorization and domain-model_ half of this document
-(Asset, Authorization confirmation, Assessment, compatibility validation).
-No vulnerability-detection, crawling, fuzzing, or exploitation logic exists —
-see "Explicitly out of scope" below.
+HTTP client, and one non-invasive HTTP reachability scanner. Batch 5 turns
+that single controlled HTTP observation into a **passive web security
+analysis engine** — deterministic, evidence-backed findings (security
+headers, cookie security, CORS, information disclosure, transport, HTTP
+behavior) derived from the same one request, never from additional target
+traffic. Batch 3 implemented the _authorization and domain-model_ half of
+this document (Asset, Authorization confirmation, Assessment, compatibility
+validation). No vulnerability-detection, exploitation, crawling, fuzzing, or
+active testing of any kind exists — see "Explicitly out of scope" below.
 
 ## The model
 
@@ -207,20 +211,117 @@ is redacted (secret-shaped field names) and size-capped before insert; the
 reachability scanner's evidence never includes `Set-Cookie`, `Authorization`, or a
 full response body — see `packages/scanners/http-reachability`.
 
-## The first scanner: HTTP reachability (implemented, Part L)
+## The first scanner: HTTP reachability + passive analysis (implemented, Batch 4/5)
 
 `packages/scanners/http-reachability` — the only scanner package that exists —
 applies only to `WEB` assets under a `WEB` assessment. It issues exactly one `GET`
-request (via `SafeHttpClient`, never a raw HTTP client) to the asset's `baseUrl` and
-records a single `INFO`-severity finding: reachable (with status/headers/timing/
-redirect chain) or unreachable. It never submits forms, mutates state, brute-forces
-paths, crawls discovered links, fuzzes, or executes JavaScript — see the hard scope
-boundary at the top of this document.
+request (via `SafeHttpClient`, never a raw HTTP client) to the asset's `baseUrl`,
+records a single `INFO`-severity reachability finding (Batch 4, unchanged), and then
+(Batch 5) builds an `HttpObservation` from that **same response** and runs every
+passive check against it — no second request. It never submits forms, mutates state,
+brute-forces paths, crawls discovered links, fuzzes, or executes JavaScript — see the
+hard scope boundary at the top of this document.
+
+## Passive analysis architecture (implemented, Batch 5 Parts A/B/Q/R/S)
+
+```
+HTTP Reachability (one GET, via SafeHttpClient)
+      ↓
+HttpObservation           packages/scanner-core/src/http-observation.ts
+      ↓
+WEB_PASSIVE_CHECKS        packages/scanners/web-passive — a PassiveCheck<HttpObservation>[]
+      ├── security-headers   CSP / HSTS / X-Content-Type-Options / Referrer-Policy /
+      │                      Permissions-Policy / framing (X-Frame-Options or CSP frame-ancestors)
+      ├── cookie-security     Secure / HttpOnly / SameSite, from sanitized Set-Cookie metadata
+      ├── cors                 wildcard origin, wildcard+credentials
+      ├── information-disclosure   Server / X-Powered-By / framework-version headers
+      ├── transport             HTTP target, HTTPS→HTTP downgrade
+      └── http-behavior          5xx responses, missing Content-Type
+      ↓
+ReportFindingInput[]  (pure, synchronous — see below)
+      ↓
+apps/worker persists findings + evidence (deduplicated by fingerprint)
+```
+
+- **`HttpObservation`** (`packages/scanner-core/src/http-observation.ts`) is the typed
+  model every check operates on: status, headers (excluding `set-cookie`, which
+  becomes sanitized `HttpCookieObservation[]` — name + flags only, value discarded
+  immediately after parsing), content type, redirect chain, and TLS protocol when
+  available. It is built once, from the reachability scanner's one response.
+- **`PassiveCheck<TObservation>`** (`packages/scanner-core/src/passive-check.ts`) is
+  `{ name, category, run(observation, context) }` — deliberately synchronous and pure.
+  A check has no `httpClient`, no network access at all; the only way to add a target
+  request is to write a new `ScannerPlugin`, not a passive check. `runPassiveChecks()`
+  runs every check in a registry against the same observation and concatenates their
+  findings; `createPassiveCheckRegistry()` rejects duplicate check names at
+  registration time (Part R) — there is no route for an API client to select or
+  supply a check implementation.
+- **WEB_PASSIVE** (`packages/scanners/web-passive`'s `WEB_PASSIVE_CHECKS`) is the
+  built-in profile for this batch: security-headers, cookie-security, cors,
+  information-disclosure, transport, http-behavior — six checks, one category each.
+- **Request budget**: proven by test, not just by design — both
+  `packages/scanners/http-reachability/src/index.test.ts` and
+  `apps/worker/src/assessment-processor.integration.test.ts`'s end-to-end test count
+  actual requests reaching the fixture server and assert the count is exactly 1 for
+  the whole assessment, reachability finding plus all six passive checks included.
+
+## Finding quality and false-positive control (Batch 5 Parts C/K/L/M/V)
+
+Every check follows the same discipline: only report a finding when the HTTP
+evidence directly proves the condition, and default to `INFO` or no finding at all
+when the evidence doesn't support a stronger claim. Concretely:
+
+- A **missing** recommended header (CSP, Referrer-Policy, X-Content-Type-Options) is
+  `LOW` severity, `HIGH` confidence — the absence itself is 100% certain, but the
+  practical impact is a judgment call, kept conservative. A missing
+  Permissions-Policy is `INFO` only — explicitly not treated as a vulnerability.
+- **HSTS is never evaluated on an HTTP response** — Strict-Transport-Security is
+  meaningless without TLS in the first place (`security-headers.ts`'s `checkHsts`).
+- **Framing protection** checks X-Frame-Options **or** CSP `frame-ancestors` and
+  reports at most one finding — never two findings for the same underlying gap, and
+  never a false "missing X-Frame-Options" when `frame-ancestors` already protects the
+  page (tested explicitly in `security-headers.test.ts`).
+- **Cookies are not assumed sensitive.** A name-pattern heuristic
+  (`session|auth|token|jwt|sid|login|remember`) only affects severity (`MEDIUM` vs
+  `LOW`) for a flag gap, never whether a finding fires at all. The Secure-flag check
+  is skipped entirely on an HTTP response (Secure would break the cookie, not protect
+  it, on a site that isn't HTTPS). `SameSite=None` without `Secure` is flagged at
+  `MEDIUM`/`HIGH` confidence because that combination is rejected outright by modern
+  browsers — a deterministic misconfiguration, not a judgment call.
+- **CORS** only fires on `Access-Control-Allow-Origin: *`, and only escalates to
+  `MEDIUM` when combined with `Access-Control-Allow-Credentials: true` (an invalid,
+  directly-observed combination) — confidence is `MEDIUM` there because passive
+  analysis alone can't prove a browser would honor it. A specific origin, even
+  combined with credentials, produces **no finding** — Part F is explicit that
+  passive analysis must never claim behavior it never sent a differentiating
+  `Origin` header to observe.
+- **Information disclosure** (`Server`, `X-Powered-By`, framework-version headers) is
+  always `INFO` — disclosure alone is never scored as a vulnerability, and a finding
+  is only ever created for a header that is literally present in the response (never
+  invented).
+- **HTTP-only targets** are `LOW`, not `HIGH`/`CRITICAL`; an HTTPS→HTTP downgrade
+  redirect is `MEDIUM` because it is a real, directly-observed regression in an
+  existing protection, not a bare absence.
+
+## Evidence and remediation (Batch 5 Parts M/N/P; schema in Part W)
+
+`findings` gained three columns this batch: `key` (the check's stable identifier for
+this specific observation, e.g. `cookie:session:missing-secure` — distinct from the
+opaque `fingerprint` hash, useful for filtering/debugging), `remediation` (static,
+deterministic guidance — never AI-generated), and `references` (a small `jsonb`
+array of genuinely relevant URLs, omitted when there's nothing worth linking).
+Evidence keeps the same size-capping and secret-key-pattern redaction from Batch 4
+(`apps/worker/src/assessment-processor.ts`'s `sanitizeEvidence`); cookie evidence is
+deliberately keyed `name` rather than `cookie` specifically because that redaction
+pattern treats any key _containing_ "cookie" as secret-shaped — the safer, more
+precise choice over trying to special-case the pattern.
 
 ## Explicitly out of scope for this document
 
 Vulnerability detection/exploitation of any kind (SQLi, XSS, SSRF exploitation,
-auth bypass, brute force, fuzzing), crawling, browser automation/JS execution, API
-fuzzing/OpenAPI-driven testing, mobile scanning, and report generation. Those remain
-future batches; this document is updated as each piece actually lands, not written
-once and left stale.
+auth bypass, brute force, fuzzing, parameter discovery, form submission or any
+mutating request), crawling, browser automation/JS execution, API fuzzing/
+OpenAPI-driven testing, active CORS testing (sending an attacker-controlled `Origin`
+header), mobile scanning, AI/LLM-generated analysis of any kind, and report
+generation. Those remain future batches; this document is updated as each piece
+actually lands, not written once and left stale.

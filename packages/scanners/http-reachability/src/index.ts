@@ -1,6 +1,12 @@
-import { ScopeViolationError, SsrfViolationError } from '@aivoryx/scanner-core';
+import {
+  ScopeViolationError,
+  SsrfViolationError,
+  buildHttpObservation,
+  runPassiveChecks,
+} from '@aivoryx/scanner-core';
 import type { ScannerContext, ScannerPlugin } from '@aivoryx/scanner-core';
 import type { WebAssetConfig } from '@aivoryx/shared-types';
+import { WEB_PASSIVE_CHECKS } from '@aivoryx/scanner-web-passive';
 
 const SCANNER_NAME = 'http-reachability';
 
@@ -77,6 +83,17 @@ export const httpReachabilityScanner: ScannerPlugin = {
           bodyTruncated: response.bodyTruncated,
         },
       });
+
+      // Passive analysis (Batch 5): reuses this SAME response — no
+      // additional outbound request is made. See Part Q/Y.
+      const observation = buildHttpObservation(response);
+      const passiveFindings = runPassiveChecks(WEB_PASSIVE_CHECKS, observation, {
+        target,
+        assetType: context.asset.assetType,
+      });
+      for (const finding of passiveFindings) {
+        await context.reportFinding(finding);
+      }
     } catch (error) {
       // Scope/SSRF rejections are security-relevant (e.g. a redirect tried to
       // leave the authorized scope) — the worker must classify these as a

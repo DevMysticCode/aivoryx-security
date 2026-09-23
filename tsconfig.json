@@ -11,6 +11,7 @@
     { "path": "packages/queue" },
     { "path": "packages/scanner-core" },
     { "path": "packages/scanners/http-reachability" },
+    { "path": "packages/scanners/web-passive" },
     { "path": "packages/ai-core" },
     { "path": "packages/report-core" }
   ]

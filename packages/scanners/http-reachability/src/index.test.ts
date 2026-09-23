@@ -18,9 +18,11 @@ function startServer(
 
 describe('httpReachabilityScanner', () => {
   let okServer: { server: Server; port: number };
+  let requestCount = 0;
 
   beforeAll(async () => {
     okServer = await startServer((_req, res) => {
+      requestCount += 1;
       res.writeHead(200, {
         'Content-Type': 'text/plain',
         'Set-Cookie': 'secret=should-never-appear',
@@ -56,7 +58,7 @@ describe('httpReachabilityScanner', () => {
     };
   }
 
-  it('reports an INFO reachability finding and never persists Set-Cookie', async () => {
+  it('reports an INFO reachability finding, runs passive checks off the same response, and never persists the Set-Cookie value', async () => {
     const scope: AssessmentScope = {
       schemes: ['http', 'https'],
       hosts: ['127.0.0.1'],
@@ -66,18 +68,32 @@ describe('httpReachabilityScanner', () => {
     };
     const { context, findings } = makeContext(`http://127.0.0.1:${okServer.port}/`, scope);
 
+    const before = requestCount;
     await httpReachabilityScanner.run(context);
 
-    expect(findings).toHaveLength(1);
-    const finding = findings[0] as {
-      severity: string;
+    // Exactly one outbound request for the whole run — passive analysis
+    // must never generate additional target requests. See Part Y.
+    expect(requestCount - before).toBe(1);
+
+    type TestFinding = {
       key: string;
-      evidence: Record<string, unknown>;
+      category: string;
+      severity: string;
+      evidence?: Record<string, unknown>;
     };
-    expect(finding.severity).toBe('INFO');
-    expect(finding.key).toBe('reachable');
-    expect(JSON.stringify(finding.evidence)).not.toContain('should-never-appear');
-    expect(JSON.stringify(finding.evidence)).not.toContain('Set-Cookie');
+    const typedFindings = findings as TestFinding[];
+
+    const reachable = typedFindings.find((f) => f.key === 'reachable');
+    expect(reachable?.severity).toBe('INFO');
+    expect(reachable?.category).toBe('reachability');
+
+    // Passive checks ran against the same response and produced additional findings.
+    expect(typedFindings.length).toBeGreaterThan(1);
+    expect(typedFindings.some((f) => f.category === 'cookies')).toBe(true);
+
+    // No finding anywhere — including cookie-security evidence — ever contains the raw cookie value.
+    expect(JSON.stringify(typedFindings)).not.toContain('should-never-appear');
+    expect(JSON.stringify(typedFindings)).not.toContain('secret=');
   });
 
   it('reports an unreachable finding for a plain connection failure', async () => {
