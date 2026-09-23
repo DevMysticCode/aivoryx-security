@@ -31,12 +31,17 @@ export interface LoginInput {
 }
 
 // Never returned/logged: passwordHash. Only these fields ever leave the service.
+// platformRole is the user's own account data (never another user's) — safe to
+// expose so the frontend knows whether to offer the Platform Admin experience;
+// it is never treated as authoritative by any route, which always re-checks
+// server-side (see auth/context.ts's resolvePlatformPrincipal).
 const SAFE_USER_COLUMNS = {
   id: schema.users.id,
   email: schema.users.email,
   name: schema.users.name,
   avatarUrl: schema.users.avatarUrl,
   status: schema.users.status,
+  platformRole: schema.users.platformRole,
   createdAt: schema.users.createdAt,
 } as const;
 
@@ -93,6 +98,7 @@ export function createAuthService(deps: AuthServiceDeps) {
           name: schema.users.name,
           avatarUrl: schema.users.avatarUrl,
           status: schema.users.status,
+          platformRole: schema.users.platformRole,
           createdAt: schema.users.createdAt,
           passwordHash: schema.users.passwordHash,
         })

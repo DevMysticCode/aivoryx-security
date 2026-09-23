@@ -28,7 +28,7 @@ function testLogger() {
  */
 function baseDeps(): Pick<
   ServerDependencies,
-  'db' | 'credentialMasterKey' | 'audit' | 'assessmentJobsQueue' | 'isProduction'
+  'db' | 'credentialMasterKey' | 'audit' | 'assessmentJobsQueue' | 'isProduction' | 'corsOrigins'
 > {
   return {
     db: {} as unknown as PostgresJsDatabase<typeof schema>,
@@ -36,6 +36,7 @@ function baseDeps(): Pick<
     audit: { record: async () => undefined } as AuditService,
     assessmentJobsQueue: {} as unknown as Queue<AssessmentJobData>,
     isProduction: false,
+    corsOrigins: ['http://localhost:5173'],
   };
 }
 

@@ -1,9 +1,14 @@
 import { and, eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { schema, type AuditService } from '@aivoryx/db';
-import { AuthenticationError, requirePlatformPermission } from '@aivoryx/auth';
+import { AuthenticationError, requirePermission, requirePlatformPermission } from '@aivoryx/auth';
 import type { RequestIdentity } from '../auth/context.js';
 import { resolveTenantPrincipalForOrganization } from '../auth/context.js';
+import type {
+  UpdateOrganizationBrandingInput,
+  UpdateOrganizationProfileInput,
+  UpdateOrganizationThemeInput,
+} from '../validation/organization-settings.js';
 
 export interface OrganizationsServiceDeps {
   db: PostgresJsDatabase<typeof schema>;
@@ -18,6 +23,21 @@ export interface CreateOrganizationInput {
 export interface RequestContext {
   ipAddress?: string | undefined;
   userAgent?: string | undefined;
+}
+
+/**
+ * Zod's `.optional()` fields are typed `T | undefined`, but under
+ * `exactOptionalPropertyTypes` Drizzle's `.set()` rejects an explicit
+ * `undefined` value (as opposed to an omitted key) for columns that don't
+ * declare `| undefined`. Omitted fields should simply not be part of the
+ * update — this strips them rather than writing them as null.
+ */
+function withoutUndefined<T extends Record<string, unknown>>(
+  obj: T,
+): { [K in keyof T]: Exclude<T[K], undefined> } {
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as {
+    [K in keyof T]: Exclude<T[K], undefined>;
+  };
 }
 
 export function createOrganizationsService(deps: OrganizationsServiceDeps) {
@@ -103,6 +123,16 @@ export function createOrganizationsService(deps: OrganizationsServiceDeps) {
           status: schema.organizations.status,
           createdAt: schema.organizations.createdAt,
           updatedAt: schema.organizations.updatedAt,
+          logoUrl: schema.organizations.logoUrl,
+          themePreset: schema.organizations.themePreset,
+          primaryColor: schema.organizations.primaryColor,
+          secondaryColor: schema.organizations.secondaryColor,
+          accentColor: schema.organizations.accentColor,
+          // The caller's own role in this org — lets the frontend gate
+          // navigation without a second round trip per organization. Never
+          // used as the source of truth for an actual permission check
+          // (every mutating route still resolves and checks this server-side).
+          myRole: schema.organizationMembers.role,
         })
         .from(schema.organizations)
         .innerJoin(
@@ -130,6 +160,119 @@ export function createOrganizationsService(deps: OrganizationsServiceDeps) {
         deps.db,
       );
       if (!principal) return null;
+
+      return organization;
+    },
+
+    /**
+     * Company profile fields (Part 23). Gated on `organization:update` —
+     * the same permission that already governs org-level administration, so
+     * this introduces no new authorization surface. Returns null both when
+     * the org doesn't exist and when the caller can't access it.
+     */
+    async updateProfile(
+      identity: RequestIdentity,
+      organizationId: string,
+      input: UpdateOrganizationProfileInput,
+      context: RequestContext,
+    ) {
+      const principal = await resolveTenantPrincipalForOrganization(
+        identity,
+        organizationId,
+        deps.db,
+      );
+      if (!principal) return null;
+      requirePermission(principal, 'organization:update');
+
+      const [organization] = await deps.db
+        .update(schema.organizations)
+        .set({ ...withoutUndefined(input), updatedAt: new Date() })
+        .where(eq(schema.organizations.id, organizationId))
+        .returning();
+      if (!organization) return null;
+
+      await deps.audit.record({
+        organizationId,
+        actorUserId: principal.authType === 'user' ? principal.userId : null,
+        action: 'organization.profile_updated',
+        resourceType: 'organization',
+        resourceId: organizationId,
+        metadata: { fields: Object.keys(input) },
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
+
+      return organization;
+    },
+
+    /** Branding (Part 24) — URL references only, validated before this is ever called. */
+    async updateBranding(
+      identity: RequestIdentity,
+      organizationId: string,
+      input: UpdateOrganizationBrandingInput,
+      context: RequestContext,
+    ) {
+      const principal = await resolveTenantPrincipalForOrganization(
+        identity,
+        organizationId,
+        deps.db,
+      );
+      if (!principal) return null;
+      requirePermission(principal, 'organization:update');
+
+      const [organization] = await deps.db
+        .update(schema.organizations)
+        .set({ ...withoutUndefined(input), updatedAt: new Date() })
+        .where(eq(schema.organizations.id, organizationId))
+        .returning();
+      if (!organization) return null;
+
+      await deps.audit.record({
+        organizationId,
+        actorUserId: principal.authType === 'user' ? principal.userId : null,
+        action: 'organization.branding_updated',
+        resourceType: 'organization',
+        resourceId: organizationId,
+        metadata: { fields: Object.keys(input) },
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
+
+      return organization;
+    },
+
+    /** Theme (Part 25) — strictly validated hex colors + a fixed preset enum, never free-form CSS. */
+    async updateTheme(
+      identity: RequestIdentity,
+      organizationId: string,
+      input: UpdateOrganizationThemeInput,
+      context: RequestContext,
+    ) {
+      const principal = await resolveTenantPrincipalForOrganization(
+        identity,
+        organizationId,
+        deps.db,
+      );
+      if (!principal) return null;
+      requirePermission(principal, 'organization:update');
+
+      const [organization] = await deps.db
+        .update(schema.organizations)
+        .set({ ...withoutUndefined(input), updatedAt: new Date() })
+        .where(eq(schema.organizations.id, organizationId))
+        .returning();
+      if (!organization) return null;
+
+      await deps.audit.record({
+        organizationId,
+        actorUserId: principal.authType === 'user' ? principal.userId : null,
+        action: 'organization.theme_updated',
+        resourceType: 'organization',
+        resourceId: organizationId,
+        metadata: { fields: Object.keys(input) },
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
 
       return organization;
     },

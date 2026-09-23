@@ -25,6 +25,7 @@ async function main(): Promise<void> {
     audit,
     assessmentJobsQueue,
     isProduction: config.isProduction,
+    corsOrigins: [config.urls.publicAppUrl],
   });
 
   const shutdown = createShutdownHandler(logger, async () => {

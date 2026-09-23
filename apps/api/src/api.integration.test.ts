@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import type { Redis } from 'ioredis';
 import type { Queue } from 'bullmq';
+import { eq } from 'drizzle-orm';
 import { createDbClient, createAuditService, schema, type DbClient } from '@aivoryx/db';
 import {
   createRedisConnection,
@@ -55,6 +56,7 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
       audit,
       assessmentJobsQueue,
       isProduction: false,
+      corsOrigins: ['http://localhost:5173'],
     });
     await app.ready();
   });
@@ -1011,6 +1013,200 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
       const organizations = response.json().organizations as { id: string }[];
       expect(organizations).toHaveLength(1);
       expect(organizations[0]?.id).toBe(org.id);
+    });
+  });
+
+  describe('organization settings (profile / branding / theme)', () => {
+    it('an OWNER can update profile, branding, and theme, and each write is audited', async () => {
+      const owner = await registerAndLogin('settings-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'settings-org');
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+
+      const profileResponse = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/profile`,
+        ...auth,
+        payload: { displayName: 'Acme Security', industry: 'Fintech', country: 'GB' },
+      });
+      expect(profileResponse.statusCode).toBe(200);
+      expect(profileResponse.json().organization).toMatchObject({
+        displayName: 'Acme Security',
+        industry: 'Fintech',
+        country: 'GB',
+      });
+
+      const brandingResponse = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/branding`,
+        ...auth,
+        payload: { logoUrl: 'https://cdn.example.com/logo.png' },
+      });
+      expect(brandingResponse.statusCode).toBe(200);
+      expect(brandingResponse.json().organization).toMatchObject({
+        logoUrl: 'https://cdn.example.com/logo.png',
+      });
+
+      const themeResponse = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/theme`,
+        ...auth,
+        payload: { themePreset: 'ocean', primaryColor: '#00A19A' },
+      });
+      expect(themeResponse.statusCode).toBe(200);
+      expect(themeResponse.json().organization).toMatchObject({
+        themePreset: 'ocean',
+        primaryColor: '#00A19A',
+      });
+
+      const events = await client.db
+        .select()
+        .from(schema.auditEvents)
+        .where(eq(schema.auditEvents.organizationId, org.id));
+      const actions = events.map((event) => event.action);
+      expect(actions).toEqual(
+        expect.arrayContaining([
+          'organization.profile_updated',
+          'organization.branding_updated',
+          'organization.theme_updated',
+        ]),
+      );
+    });
+
+    it('rejects an invalid hex color and a non-https logo URL (400)', async () => {
+      const owner = await registerAndLogin('settings-invalid-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'settings-invalid-org');
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+
+      const badTheme = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/theme`,
+        ...auth,
+        payload: { themePreset: 'ocean', primaryColor: 'not-a-color' },
+      });
+      expect(badTheme.statusCode).toBe(400);
+
+      const badBranding = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/branding`,
+        ...auth,
+        payload: { logoUrl: 'javascript:alert(1)' },
+      });
+      expect(badBranding.statusCode).toBe(400);
+    });
+
+    it('a VIEWER cannot update organization settings (permission enforcement)', async () => {
+      const owner = await registerAndLogin('settings-perm-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'settings-perm-org');
+      const viewer = await registerAndLogin('settings-perm-viewer');
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/organizations/${org.id}/members`,
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+        payload: { email: viewer.email, role: 'VIEWER' },
+      });
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/profile`,
+        cookies: { [SESSION_COOKIE_NAME]: viewer.sessionCookie },
+        payload: { displayName: 'Should not be allowed' },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('organization A cannot update organization B settings (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('settings-iso-a');
+      const ownerB = await registerAndLogin('settings-iso-b');
+      const orgB = await createOrgAsOwner(ownerB.sessionCookie, 'settings-iso-org-b');
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${orgB.id}/settings/profile`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+        payload: { displayName: 'Hijacked' },
+      });
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('rejects an unauthenticated request', async () => {
+      const owner = await registerAndLogin('settings-unauth-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'settings-unauth-org');
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/organizations/${org.id}/settings/profile`,
+        payload: { displayName: 'Nope' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('platform administration', () => {
+    it('a session user without a platform role cannot access platform stats', async () => {
+      const user = await registerAndLogin('platform-none');
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/platform/stats',
+        cookies: { [SESSION_COOKIE_NAME]: user.sessionCookie },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('a tenant OWNER cannot access platform stats even for their own organization', async () => {
+      const owner = await registerAndLogin('platform-tenant-owner');
+      await createOrgAsOwner(owner.sessionCookie, 'platform-tenant-org');
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/platform/stats',
+        cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('a SUPER_ADMIN sees real platform-wide counts', async () => {
+      const admin = await registerAndLogin('platform-admin');
+      await client.db
+        .update(schema.users)
+        .set({ platformRole: 'SUPER_ADMIN' })
+        .where(eq(schema.users.id, admin.userId));
+
+      const owner = await registerAndLogin('platform-admin-org-owner');
+      const org = await createOrgAsOwner(owner.sessionCookie, 'platform-admin-visible-org');
+
+      const statsResponse = await app.inject({
+        method: 'GET',
+        url: '/api/v1/platform/stats',
+        cookies: { [SESSION_COOKIE_NAME]: admin.sessionCookie },
+      });
+      expect(statsResponse.statusCode).toBe(200);
+      const stats = statsResponse.json().stats;
+      expect(stats.organizations).toEqual(expect.any(Number));
+      expect(stats.organizations).toBeGreaterThan(0);
+
+      const recentResponse = await app.inject({
+        method: 'GET',
+        url: '/api/v1/platform/organizations/recent',
+        cookies: { [SESSION_COOKIE_NAME]: admin.sessionCookie },
+      });
+      expect(recentResponse.statusCode).toBe(200);
+      const organizations = recentResponse.json().organizations as { id: string }[];
+      expect(organizations.some((organization) => organization.id === org.id)).toBe(true);
+    });
+
+    it('a SUPPORT platform role can read stats but a plain platform role check still applies for unset roles', async () => {
+      const support = await registerAndLogin('platform-support');
+      await client.db
+        .update(schema.users)
+        .set({ platformRole: 'SUPPORT' })
+        .where(eq(schema.users.id, support.userId));
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/platform/stats',
+        cookies: { [SESSION_COOKIE_NAME]: support.sessionCookie },
+      });
+      expect(response.statusCode).toBe(200);
     });
   });
 });

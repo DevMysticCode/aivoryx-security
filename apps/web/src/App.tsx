@@ -1,10 +1,26 @@
-// Placeholder app shell. Routing, auth pages, and dashboard views are added
-// in a later implementation step.
+import { BrowserRouter } from 'react-router-dom';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { queryClient } from './lib/queryClient';
+import { SessionProvider } from './auth/SessionContext';
+import { OrganizationProvider } from './organization/OrganizationContext';
+import { ThemeProvider } from './theme/ThemeContext';
+import { ToastProvider } from './components/ui/Toast';
+import { AppRouter } from './router';
+
 export function App() {
   return (
-    <main>
-      <h1>Aivoryx Tester</h1>
-      <p>Platform scaffold — Phase 1 implementation in progress.</p>
-    </main>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <SessionProvider>
+          <OrganizationProvider>
+            <ThemeProvider>
+              <ToastProvider>
+                <AppRouter />
+              </ToastProvider>
+            </ThemeProvider>
+          </OrganizationProvider>
+        </SessionProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   );
 }

@@ -5,6 +5,11 @@ import type { OrganizationsService } from '../services/organizations.js';
 import type { MembersService } from '../services/members.js';
 import { requireAnyIdentity, identityFromRequest } from '../auth/context.js';
 import { badRequest, isUniqueViolation, notFound, requestContext, errorEnvelope } from '../http.js';
+import {
+  updateOrganizationProfileSchema,
+  updateOrganizationBrandingSchema,
+  updateOrganizationThemeSchema,
+} from '../validation/organization-settings.js';
 
 export interface OrganizationRouteDependencies {
   organizationsService: OrganizationsService;
@@ -76,6 +81,54 @@ export function registerOrganizationRoutes(
     const organization = await organizationsService.getById(
       identityFromRequest(request),
       organizationId,
+    );
+    if (!organization) return notFound(reply, request.id);
+    return { organization };
+  });
+
+  app.patch('/api/v1/organizations/:organizationId/settings/profile', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { organizationId } = request.params as { organizationId: string };
+    const parsed = updateOrganizationProfileSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
+
+    const organization = await organizationsService.updateProfile(
+      identityFromRequest(request),
+      organizationId,
+      parsed.data,
+      requestContext(request),
+    );
+    if (!organization) return notFound(reply, request.id);
+    return { organization };
+  });
+
+  app.patch('/api/v1/organizations/:organizationId/settings/branding', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { organizationId } = request.params as { organizationId: string };
+    const parsed = updateOrganizationBrandingSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
+
+    const organization = await organizationsService.updateBranding(
+      identityFromRequest(request),
+      organizationId,
+      parsed.data,
+      requestContext(request),
+    );
+    if (!organization) return notFound(reply, request.id);
+    return { organization };
+  });
+
+  app.patch('/api/v1/organizations/:organizationId/settings/theme', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { organizationId } = request.params as { organizationId: string };
+    const parsed = updateOrganizationThemeSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
+
+    const organization = await organizationsService.updateTheme(
+      identityFromRequest(request),
+      organizationId,
+      parsed.data,
+      requestContext(request),
     );
     if (!organization) return notFound(reply, request.id);
     return { organization };

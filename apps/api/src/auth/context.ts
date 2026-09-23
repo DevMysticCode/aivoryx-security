@@ -6,6 +6,7 @@ import {
   AuthenticationError,
   TenantAccessError,
   API_KEY_DEFAULT_ROLE,
+  createPlatformPrincipal,
   createTenantPrincipal,
   verifyApiKeyCredential,
   verifySessionCredential,
@@ -48,8 +49,33 @@ export function registerAuthContext(app: FastifyInstance, deps: AuthContextDepen
     const rawToken = request.cookies[SESSION_COOKIE_NAME];
     if (rawToken) {
       request.userId = await authenticateSession(rawToken, deps);
+      if (request.userId) {
+        request.principal = await resolvePlatformPrincipal(request.userId, deps);
+      }
     }
   });
+}
+
+/**
+ * Platform roles are never derived from, or combined with, tenant membership
+ * (see packages/auth/src/roles.ts) — a session user is a platform principal
+ * exactly when their `users.platform_role` is set, independent of any
+ * organization membership they may also hold. Tenant-scoped resolution for
+ * such a request still falls back to `identity.userId` correctly wherever it
+ * is needed, since `request.userId` remains set either way.
+ */
+async function resolvePlatformPrincipal(
+  userId: string,
+  deps: AuthContextDependencies,
+): Promise<AuthPrincipal | null> {
+  const [user] = await deps.db
+    .select({ platformRole: schema.users.platformRole })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+
+  if (!user?.platformRole) return null;
+  return createPlatformPrincipal(userId, user.platformRole);
 }
 
 async function authenticateApiKey(

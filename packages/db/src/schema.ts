@@ -218,6 +218,38 @@ export const organizations = pgTable('organizations', {
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   status: organizationStatusEnum('status').notNull().default('active'),
+
+  // --- Company profile (Batch 7 Part 23) -----------------------------------
+  displayName: text('display_name'),
+  website: text('website'),
+  industry: text('industry'),
+  description: text('description'),
+  contactEmail: text('contact_email'),
+  phone: text('phone'),
+  address: text('address'),
+  country: text('country'),
+  timezone: text('timezone'),
+  locale: text('locale'),
+  currency: text('currency'),
+
+  // --- Branding (Batch 7 Part 24) — URL references only, never binary blobs
+  // or arbitrary CSS/HTML. No object-storage subsystem exists yet, so this
+  // is a clean, validated reference to an externally-hosted image rather
+  // than a hard-coded insecure local-disk upload path. Every value is
+  // strictly validated (scheme + shape) before being persisted — see
+  // apps/api/src/validation/organization-settings.ts.
+  logoUrl: text('logo_url'),
+  darkLogoUrl: text('dark_logo_url'),
+  faviconUrl: text('favicon_url'),
+
+  // --- Theme (Batch 7 Part 25) — strictly validated hex colors only, never
+  // free-form CSS. The frontend generates CSS custom properties from these
+  // trusted values; tenants can never inject arbitrary style rules.
+  themePreset: text('theme_preset').notNull().default('aivoryx'),
+  primaryColor: text('primary_color'),
+  secondaryColor: text('secondary_color'),
+  accentColor: text('accent_color'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

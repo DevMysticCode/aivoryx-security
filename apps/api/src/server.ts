@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyBaseLogger, type FastifyError } from 'fastify';
 import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import type { Queue } from 'bullmq';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
@@ -17,6 +18,7 @@ import { createProjectsService } from './services/projects.js';
 import { createAssetsService } from './services/assets.js';
 import { createAssessmentsService } from './services/assessments.js';
 import { createApiKeysService } from './services/api-keys.js';
+import { createPlatformService } from './services/platform.js';
 import { registerHealthRoutes, type HealthCheckResult } from './routes/health.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerOrganizationRoutes } from './routes/organizations.js';
@@ -24,6 +26,7 @@ import { registerProjectRoutes } from './routes/projects.js';
 import { registerAssetRoutes } from './routes/assets.js';
 import { registerAssessmentRoutes } from './routes/assessments.js';
 import { registerApiKeyRoutes } from './routes/api-keys.js';
+import { registerPlatformRoutes } from './routes/platform.js';
 
 export type { HealthCheckResult } from './routes/health.js';
 
@@ -36,6 +39,8 @@ export interface ServerDependencies {
   audit: AuditService;
   assessmentJobsQueue: Queue<AssessmentJobData>;
   isProduction: boolean;
+  /** Origins allowed to make credentialed cross-origin requests (the frontend's own origin(s)) — see Part frontend-architecture.md's "API client" section. */
+  corsOrigins: string[];
 }
 
 /**
@@ -63,6 +68,13 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
 
   void app.register(helmet);
   void app.register(cookie);
+  // Credentialed cross-origin requests are only ever allowed from the
+  // frontend's own configured origin(s) — never a wildcard, since the
+  // session cookie must never be sent to an untrusted origin.
+  void app.register(cors, {
+    origin: deps.corsOrigins,
+    credentials: true,
+  });
   void app.register(rateLimit, {
     global: true,
     max: 300,
@@ -107,6 +119,7 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
     audit: deps.audit,
     credentialMasterKey: deps.credentialMasterKey,
   });
+  const platformService = createPlatformService({ db: deps.db });
 
   registerAuthRoutes(app, { authService, isProduction: deps.isProduction });
   registerOrganizationRoutes(app, { organizationsService, membersService });
@@ -114,6 +127,7 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
   registerAssetRoutes(app, { assetsService });
   registerAssessmentRoutes(app, { assessmentsService });
   registerApiKeyRoutes(app, { apiKeysService });
+  registerPlatformRoutes(app, { platformService });
 
   return app;
 }
