@@ -71,9 +71,14 @@ export function buildServer(deps: ServerDependencies): FastifyInstance {
   // Credentialed cross-origin requests are only ever allowed from the
   // frontend's own configured origin(s) — never a wildcard, since the
   // session cookie must never be sent to an untrusted origin.
+  // @fastify/cors defaults `methods` to only 'GET,HEAD,POST' — every
+  // PATCH/DELETE route in this API (organization settings, assets, members,
+  // API keys, ...) needs those listed explicitly or the browser's preflight
+  // rejects them before the request ever reaches a route handler.
   void app.register(cors, {
     origin: deps.corsOrigins,
     credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'],
   });
   void app.register(rateLimit, {
     global: true,

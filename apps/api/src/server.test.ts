@@ -143,3 +143,33 @@ describe('error handling and correlation id', () => {
     expect(response.json().error.requestId.length).toBeGreaterThan(0);
   });
 });
+
+describe('CORS', () => {
+  it('allows PATCH and DELETE preflight requests from the configured frontend origin', async () => {
+    // Regression test: @fastify/cors defaults `methods` to only
+    // 'GET,HEAD,POST' — every PATCH/DELETE route (org settings, assets,
+    // members, API keys, ...) silently fails its browser preflight unless
+    // `methods` is set explicitly in server.ts's cors registration.
+    const app = buildServer({
+      logger: testLogger(),
+      ...baseDeps(),
+      checkDatabaseHealth: healthy,
+      checkRedisHealth: healthy,
+    });
+
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/v1/assets/00000000-0000-0000-0000-000000000000',
+      headers: {
+        origin: 'http://localhost:5173',
+        'access-control-request-method': 'PATCH',
+        'access-control-request-headers': 'content-type',
+      },
+    });
+
+    expect(response.statusCode).toBe(204);
+    const allowedMethods = response.headers['access-control-allow-methods'];
+    expect(allowedMethods).toContain('PATCH');
+    expect(allowedMethods).toContain('DELETE');
+  });
+});
