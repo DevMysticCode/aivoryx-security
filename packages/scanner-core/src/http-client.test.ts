@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AssessmentScope } from '@aivoryx/shared-types';
@@ -12,12 +13,17 @@ import { ScopeViolationError, SsrfViolationError, ResourceLimitExceededError } f
 
 function startServer(
   handler: Parameters<typeof createServer>[0],
+  /** Omit to bind dual-stack (both 127.0.0.1 and ::1) — needed for a 'localhost' target, since which family wins DNS resolution is system-dependent. */
+  host: string | undefined = '127.0.0.1',
 ): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
     const server = createServer(handler);
-    server.listen(0, '127.0.0.1', () => {
-      resolve({ server, port: (server.address() as AddressInfo).port });
-    });
+    const onListening = () => resolve({ server, port: (server.address() as AddressInfo).port });
+    if (host) {
+      server.listen(0, host, onListening);
+    } else {
+      server.listen(0, onListening);
+    }
   });
 }
 
@@ -272,5 +278,48 @@ describe('SafeHttpClient', () => {
       { method: 'HEAD' },
     );
     expect(response.status).toBe(200);
+  });
+
+  it('connects successfully to a hostname target, not just a literal IP', async () => {
+    // Regression test: Node 20+ enables Happy Eyeballs (`autoSelectFamily`) by
+    // default, which only engages for a *hostname* target — a literal IP (as
+    // every other test in this file uses) skips the custom `lookup` callback
+    // entirely, so it never exercised this code path. When Happy Eyeballs is
+    // active, Node calls `lookup` with `{ all: true }` and expects the
+    // callback to receive an ARRAY of addresses, not the legacy single
+    // `(err, address, family)` triple. Getting this wrong previously crashed
+    // every hostname-based request (so effectively every real-world target)
+    // deep inside Node's net internals with "Invalid IP address: undefined".
+    // Bind to whatever address this system's resolver actually returns for
+    // 'localhost' first — SafeHttpClient will resolve and connect to that
+    // same address, and which family (::1 vs 127.0.0.1) wins is otherwise
+    // platform-dependent.
+    const { address: localhostAddress } = await dnsLookup('localhost');
+    const hostnameServer = await startServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    }, localhostAddress);
+
+    try {
+      const client = new SafeHttpClient({
+        connectTimeoutMs: 2000,
+        requestTimeoutMs: 5000,
+        maxRedirects: 3,
+        maxResponseBytes: 1_000_000,
+        maxHeaderBytes: 32_768,
+        allowPrivateRanges: true,
+      });
+
+      const response = await client.request(`http://localhost:${hostnameServer.port}/`, {
+        schemes: ['http', 'https'],
+        hosts: ['localhost'],
+        ports: [hostnameServer.port],
+        allowedPathPrefixes: [],
+        exclusions: { hosts: [], paths: [] },
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      hostnameServer.server.close();
+    }
   });
 });

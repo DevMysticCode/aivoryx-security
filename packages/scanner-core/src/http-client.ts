@@ -156,16 +156,44 @@ export class SafeHttpClient {
     const { connectTimeoutMs, requestTimeoutMs, maxResponseBytes, maxHeaderBytes } = this.options;
 
     return new Promise((resolve, reject) => {
+      const resolvedFamily = pinnedAddress.includes(':') ? 6 : 4;
+
+      // Pins the connection to the exact address already validated above — this
+      // is what closes the DNS-rebinding window (see dns-safe-resolve.ts). There
+      // is only ever one candidate address here, in either calling convention
+      // below; Happy Eyeballs' multi-candidate racing never applies since there
+      // is nothing else to race.
+      //
+      // Node 20+ enables Happy Eyeballs (`autoSelectFamily`) by default for
+      // TLS/net connections, which calls a custom `lookup` function with
+      // `{ all: true }` and expects the callback to receive an ARRAY of
+      // addresses — `(err, addresses)` — not the legacy single
+      // `(err, address, family)` triple that plain `http:` requests use. Only
+      // handling the legacy form here meant every HTTPS request silently
+      // crashed deep inside Node's net internals with a cryptic
+      // "Invalid IP address: undefined" the moment that array was misread as a
+      // single value — see https://nodejs.org/api/net.html#serveraddress for
+      // the documented `lookup` contract.
       const lookup = (
         _hostname: string,
         opts: unknown,
-        callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+        callback: (
+          err: NodeJS.ErrnoException | null,
+          address: string | LookupAddress[],
+          family?: number,
+        ) => void,
       ) => {
-        // Pins the connection to the exact address already validated above —
-        // this is what closes the DNS-rebinding window (see dns-safe-resolve.ts).
-        const family =
-          typeof opts === 'object' && opts && 'family' in opts ? (opts as LookupAddress).family : 0;
-        callback(null, pinnedAddress, family || (pinnedAddress.includes(':') ? 6 : 4));
+        const options = (typeof opts === 'object' && opts ? opts : {}) as {
+          family?: number;
+          all?: boolean;
+        };
+        const family = options.family || resolvedFamily;
+
+        if (options.all) {
+          callback(null, [{ address: pinnedAddress, family }]);
+        } else {
+          callback(null, pinnedAddress, family);
+        }
       };
 
       const req = transport.request({
