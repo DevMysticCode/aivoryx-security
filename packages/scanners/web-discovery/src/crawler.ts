@@ -5,6 +5,7 @@ import {
   checkUrlAgainstScope,
   ScopeViolationError,
   SsrfViolationError,
+  RequestScheduler,
   type SafeHttpClient,
   type SafeHttpResponse,
   type ScannerLogger,
@@ -16,7 +17,6 @@ import { normalizeUrl, redactSensitiveQueryParams } from './url-normalize.js';
 import { extractFromHtml } from './html-extract.js';
 import { parseRobots } from './robots.js';
 import { parseSitemap } from './sitemap.js';
-import { RequestScheduler } from './rate-limiter.js';
 import {
   DEFAULT_CRAWL_LIMITS,
   type CrawlLimits,

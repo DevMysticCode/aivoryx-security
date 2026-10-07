@@ -49,6 +49,9 @@ export interface AppConfig {
     maxRedirects: number;
     maxHeaderBytes: number;
     maxRequestsPerAssessment: number;
+    activeTestingDefaultRequestBudget: number;
+    activeTestingMaxConcurrentRequests: number;
+    activeTestingRequestsPerSecond: number;
   };
 
   ai: {

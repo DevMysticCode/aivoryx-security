@@ -186,6 +186,66 @@ export interface DiscoveredUrl {
   createdAt: string;
 }
 
+export const ACTIVE_TEST_PLAN_STATUSES = [
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'BUDGET_EXHAUSTED',
+  'SKIPPED',
+] as const;
+export type ActiveTestPlanStatus = (typeof ACTIVE_TEST_PLAN_STATUSES)[number];
+
+export interface ActiveTestPlan {
+  id: string;
+  assessmentId: string;
+  status: ActiveTestPlanStatus;
+  requestBudget: number;
+  requestsUsed: number;
+  testsSelectedCount: number;
+  testsCompletedCount: number;
+  testsFailedCount: number;
+  testsSkippedCount: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const ACTIVE_TEST_EXECUTION_STATUSES = [
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'BUDGET_EXHAUSTED',
+  'SKIPPED',
+] as const;
+export type ActiveTestExecutionStatus = (typeof ACTIVE_TEST_EXECUTION_STATUSES)[number];
+
+export interface ActiveTestExecution {
+  id: string;
+  planId: string;
+  assessmentId: string;
+  testId: string;
+  testVersion: string;
+  target: string;
+  status: ActiveTestExecutionStatus;
+  requestsUsed: number;
+  findingId: string | null;
+  durationMs: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface ActiveTestDefinitionSummary {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  potentialSeverity: FindingSeverity;
+  safety: 'SAFE_READ_ONLY';
+}
+
 export interface PlatformStats {
   organizations: number;
   activeOrganizations: number;

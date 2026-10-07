@@ -36,3 +36,11 @@ export type { FindingSeverity, FindingConfidence, FindingStatus } from './findin
 
 export { URL_TYPES, DISCOVERY_METHODS, isUrlType, isDiscoveryMethod } from './discovery.js';
 export type { UrlType, DiscoveryMethod } from './discovery.js';
+
+export {
+  ACTIVE_TEST_PLAN_STATUSES,
+  ACTIVE_TEST_EXECUTION_STATUSES,
+  isActiveTestPlanStatus,
+  isActiveTestExecutionStatus,
+} from './active-testing.js';
+export type { ActiveTestPlanStatus, ActiveTestExecutionStatus } from './active-testing.js';

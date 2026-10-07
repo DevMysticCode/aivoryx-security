@@ -24,6 +24,11 @@ const listDiscoveredUrlsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
+const listActiveTestExecutionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
 export function registerAssessmentRoutes(
   app: FastifyInstance,
   deps: AssessmentRouteDependencies,
@@ -93,6 +98,50 @@ export function registerAssessmentRoutes(
       discoveredUrls: result.items,
       pagination: { total: result.total, limit: result.limit, offset: result.offset },
     };
+  });
+
+  app.get('/api/v1/assessments/:assessmentId/active-test-plan', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { assessmentId } = request.params as { assessmentId: string };
+
+    const activeTestPlan = await assessmentsService.getActiveTestPlan(
+      identityFromRequest(request),
+      assessmentId,
+    );
+    // undefined: no access/doesn't exist -> 404. null: access granted, the
+    // phase just hasn't run yet -> a real, honest response.
+    if (activeTestPlan === undefined) return notFound(reply, request.id);
+    return { activeTestPlan };
+  });
+
+  app.get('/api/v1/assessments/:assessmentId/active-test-executions', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { assessmentId } = request.params as { assessmentId: string };
+    const parsed = listActiveTestExecutionsQuerySchema.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, request.id, parsed.error.issues);
+
+    const result = await assessmentsService.listActiveTestExecutions(
+      identityFromRequest(request),
+      assessmentId,
+      parsed.data,
+    );
+    if (result === null) return notFound(reply, request.id);
+    return {
+      activeTestExecutions: result.items,
+      pagination: { total: result.total, limit: result.limit, offset: result.offset },
+    };
+  });
+
+  app.get('/api/v1/assessments/:assessmentId/active-test-definitions', async (request, reply) => {
+    requireAnyIdentity(request);
+    const { assessmentId } = request.params as { assessmentId: string };
+
+    const activeTestDefinitions = await assessmentsService.listActiveTestDefinitions(
+      identityFromRequest(request),
+      assessmentId,
+    );
+    if (activeTestDefinitions === null) return notFound(reply, request.id);
+    return { activeTestDefinitions };
   });
 
   app.get('/api/v1/findings/:findingId', async (request, reply) => {

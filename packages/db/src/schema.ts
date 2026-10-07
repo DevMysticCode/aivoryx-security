@@ -21,6 +21,8 @@ import type {
   AssessmentStatus,
   AssessmentJobStatus,
   AssessmentType,
+  ActiveTestPlanStatus,
+  ActiveTestExecutionStatus,
   DiscoveryMethod,
   FindingConfidence,
   FindingSeverity,
@@ -159,6 +161,22 @@ export const discoveryMethodEnum = pgEnum('discovery_method', [
   'ROBOTS',
   'SITEMAP',
   'REDIRECT',
+]);
+
+export const activeTestPlanStatusEnum = pgEnum('active_test_plan_status', [
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'BUDGET_EXHAUSTED',
+  'SKIPPED',
+]);
+export const activeTestExecutionStatusEnum = pgEnum('active_test_execution_status', [
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'BUDGET_EXHAUSTED',
+  'SKIPPED',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -672,6 +690,90 @@ export const discoveredUrls = pgTable(
       table.assessmentId,
       table.url,
       table.urlType,
+    ),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Active testing (Batch 8 — the execution framework future vulnerability
+// scanners plug into; zero test definitions ship this batch, so these rows
+// only ever record an honest SKIPPED plan in production today). A plan is
+// 1:1 with an assessment; an execution is one test definition run against
+// one baseline target (sourced from discovered_urls, never re-crawled). See
+// packages/active-testing-core.
+// ---------------------------------------------------------------------------
+
+export const activeTestPlans = pgTable(
+  'active_test_plans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    status: activeTestPlanStatusEnum('status').$type<ActiveTestPlanStatus>().notNull(),
+    requestBudget: integer('request_budget').notNull(),
+    requestsUsed: integer('requests_used').notNull().default(0),
+    testsSelectedCount: integer('tests_selected_count').notNull().default(0),
+    testsCompletedCount: integer('tests_completed_count').notNull().default(0),
+    testsFailedCount: integer('tests_failed_count').notNull().default(0),
+    testsSkippedCount: integer('tests_skipped_count').notNull().default(0),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assessmentIdUnique: uniqueIndex('active_test_plans_assessment_id_unique').on(
+      table.assessmentId,
+    ),
+  }),
+);
+
+export const activeTestExecutions = pgTable(
+  'active_test_executions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    planId: uuid('plan_id')
+      .notNull()
+      .references(() => activeTestPlans.id, { onDelete: 'cascade' }),
+    // Denormalized alongside planId (a plan already implies an assessment)
+    // purely to make "list executions for an assessment" a single indexed
+    // lookup instead of a join — same rationale as assessments.projectId.
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    // Stable registry id (e.g. 'WEB-REFLECTED-XSS') — test definitions are
+    // in-code, never persisted, exactly like ScannerPlugin's registry; this
+    // is not a foreign key.
+    testId: text('test_id').notNull(),
+    testVersion: text('test_version').notNull(),
+    target: text('target').notNull(),
+    status: activeTestExecutionStatusEnum('status').$type<ActiveTestExecutionStatus>().notNull(),
+    requestsUsed: integer('requests_used').notNull().default(0),
+    // Sanitized, structured facts only — never a raw request/response body.
+    // See packages/active-testing-core's Observation/ObservationDiff and
+    // sanitizeEvidence's redaction discipline in assessment-processor.ts.
+    mutation: jsonb('mutation').$type<Record<string, unknown>>(),
+    baseline: jsonb('baseline').$type<Record<string, unknown>>(),
+    result: jsonb('result').$type<Record<string, unknown>>(),
+    findingId: uuid('finding_id').references(() => findings.id, { onDelete: 'set null' }),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    durationMs: integer('duration_ms'),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    assessmentIdIdx: index('active_test_executions_assessment_id_idx').on(table.assessmentId),
+    planIdIdx: index('active_test_executions_plan_id_idx').on(table.planId),
+    // A BullMQ retry of the whole assessment job must never duplicate an
+    // execution row for the same test×target pair — mirrors
+    // discovered_urls_assessment_url_type_unique's dedup rationale.
+    planTestTargetUnique: uniqueIndex('active_test_executions_plan_test_target_unique').on(
+      table.planId,
+      table.testId,
+      table.target,
     ),
   }),
 );

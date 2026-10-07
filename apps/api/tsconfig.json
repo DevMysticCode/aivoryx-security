@@ -12,6 +12,7 @@
     { "path": "../../packages/config" },
     { "path": "../../packages/logger" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/queue" }
+    { "path": "../../packages/queue" },
+    { "path": "../../packages/active-testing-core" }
   ]
 }

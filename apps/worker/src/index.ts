@@ -8,6 +8,7 @@ import {
   QUEUE_NAMES,
 } from '@aivoryx/queue';
 import { SCANNER_REGISTRY } from '@aivoryx/scanner-web-discovery';
+import { ACTIVE_TEST_REGISTRY } from '@aivoryx/active-testing-core';
 import { createShutdownHandler } from './shutdown.js';
 import { createAssessmentJobProcessor } from './assessment-processor.js';
 
@@ -26,6 +27,10 @@ async function main(): Promise<void> {
     // performs the same reachability check plus passive analysis plus
     // scope-aware crawling, all from the same fetches. See docs/security-model.md.
     scannerRegistry: SCANNER_REGISTRY,
+    // Zero active test definitions ship in production this batch — see
+    // packages/active-testing-core. The framework exists; nothing is
+    // registered yet.
+    activeTestRegistry: ACTIVE_TEST_REGISTRY,
   });
 
   const workers = [

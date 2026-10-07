@@ -19,12 +19,16 @@ import {
   type ReportFindingInput,
   type ReportDiscoveredUrlInput,
 } from '@aivoryx/scanner-core';
+import type { ActiveTestDefinition } from '@aivoryx/active-testing-core';
+import { runActiveTestingPhase } from './active-testing-phase.js';
 
 export interface AssessmentProcessorDeps {
   db: PostgresJsDatabase<typeof schema>;
   logger: Logger;
   config: AppConfig;
   scannerRegistry: readonly ScannerPlugin[];
+  /** See active-testing-phase.ts's ActiveTestingPhaseDeps — production passes the empty ACTIVE_TEST_REGISTRY explicitly (apps/worker/src/index.ts). */
+  activeTestRegistry: readonly ActiveTestDefinition[];
 }
 
 const MAX_EVIDENCE_BYTES = 8_000;
@@ -197,6 +201,22 @@ export function createAssessmentJobProcessor(deps: AssessmentProcessorDeps) {
         };
         await plugin.run(context);
       }
+
+      await runActiveTestingPhase(
+        deps,
+        { id: assessment.id, assessmentType: assessment.assessmentType },
+        { assetType: asset.assetType },
+        {
+          assessment: { id: assessment.id, assessmentType: assessment.assessmentType },
+          asset: { id: asset.id, assetType: asset.assetType, config: asset.config },
+          scope: assessment.scope,
+          httpClient,
+          logger: scannerLogger,
+          signal: abortController.signal,
+          reportFinding: (input: ReportFindingInput) =>
+            persistFinding(deps, assessmentId, 'active-testing', input),
+        },
+      );
 
       await markCompleted(deps, assessmentId, assessmentJobId);
       log.info(

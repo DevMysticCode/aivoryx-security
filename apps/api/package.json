@@ -13,6 +13,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@aivoryx/active-testing-core": "workspace:*",
     "@aivoryx/config": "workspace:*",
     "@aivoryx/logger": "workspace:*",
     "@aivoryx/db": "workspace:*",

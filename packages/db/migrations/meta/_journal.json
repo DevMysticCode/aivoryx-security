@@ -43,6 +43,13 @@
       "when": 1790134381547,
       "tag": "0005_strong_stepford_cuckoos",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791388043202,
+      "tag": "0006_nebulous_bloodstrike",
+      "breakpoints": true
     }
   ]
 }

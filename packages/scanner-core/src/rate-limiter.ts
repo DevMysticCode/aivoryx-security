@@ -1,8 +1,11 @@
-// Bounded concurrency + a minimum spacing between request starts (Part 12).
-// Deliberately simple (a semaphore plus a "don't start before" timestamp)
-// rather than a full token-bucket — enough to guarantee the crawler can
-// never have more than `maxConcurrent` requests in flight or start requests
-// faster than `requestsPerSecond`, and simple enough to reason about in tests.
+// Bounded concurrency + a minimum spacing between request starts. Lifted
+// from packages/scanners/web-discovery (Batch 6) into scanner-core so Batch
+// 8's active-testing executor can reuse the exact same, already-tested
+// primitive instead of a second, incompatible rate limiter. Deliberately
+// simple (a semaphore plus a "don't start before" timestamp) rather than a
+// full token-bucket — enough to guarantee a caller can never have more than
+// `maxConcurrent` requests in flight or start requests faster than
+// `requestsPerSecond`, and simple enough to reason about in tests.
 
 export class RequestScheduler {
   private active = 0;

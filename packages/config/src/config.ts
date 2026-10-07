@@ -92,6 +92,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       maxRedirects: raw.SCAN_MAX_REDIRECTS,
       maxHeaderBytes: raw.SCAN_MAX_HEADER_BYTES,
       maxRequestsPerAssessment: raw.SCAN_MAX_REQUESTS_PER_ASSESSMENT,
+      activeTestingDefaultRequestBudget: raw.ACTIVE_TESTING_DEFAULT_REQUEST_BUDGET,
+      activeTestingMaxConcurrentRequests: raw.ACTIVE_TESTING_MAX_CONCURRENT_REQUESTS,
+      activeTestingRequestsPerSecond: raw.ACTIVE_TESTING_REQUESTS_PER_SECOND,
     },
 
     ai: {
@@ -139,6 +142,9 @@ export function toSafeConfigSummary(config: AppConfig): Record<string, unknown> 
       maxRedirects: config.security.maxRedirects,
       maxHeaderBytes: config.security.maxHeaderBytes,
       maxRequestsPerAssessment: config.security.maxRequestsPerAssessment,
+      activeTestingDefaultRequestBudget: config.security.activeTestingDefaultRequestBudget,
+      activeTestingMaxConcurrentRequests: config.security.activeTestingMaxConcurrentRequests,
+      activeTestingRequestsPerSecond: config.security.activeTestingRequestsPerSecond,
     },
     ai: {
       enabled: config.ai.enabled,

@@ -29,6 +29,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'assessment:create',
     'assessment:cancel',
     'finding:read',
+    'activeTest:read',
     'finding:update',
     'billing:read',
     'billing:manage',
@@ -55,6 +56,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'assessment:create',
     'assessment:cancel',
     'finding:read',
+    'activeTest:read',
     'finding:update',
     // Billing administration is OWNER-only; ADMIN can see billing state but not change it.
     'billing:read',
@@ -76,6 +78,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'assessment:create',
     'assessment:cancel',
     'finding:read',
+    'activeTest:read',
     'finding:update',
   ],
   DEVELOPER: [
@@ -91,6 +94,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'assessment:read',
     'assessment:create',
     'finding:read',
+    'activeTest:read',
   ],
   VIEWER: [
     'organization:read',
@@ -99,6 +103,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, readonly Permis
     'asset:read',
     'assessment:read',
     'finding:read',
+    'activeTest:read',
   ],
 };
 

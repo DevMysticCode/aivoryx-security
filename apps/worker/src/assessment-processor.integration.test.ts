@@ -86,6 +86,9 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       maxRedirects: 3,
       maxHeaderBytes: 32_768,
       maxRequestsPerAssessment: 20,
+      activeTestingDefaultRequestBudget: 50,
+      activeTestingMaxConcurrentRequests: 2,
+      activeTestingRequestsPerSecond: 50,
     },
     ai: { enabled: false },
   };
@@ -203,6 +206,12 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       >[0]['logger'],
       config,
       scannerRegistry: SCANNER_REGISTRY,
+      // Matches production: zero active test definitions ship (see
+      // packages/active-testing-core) — dedicated coverage for the
+      // active-testing phase itself lives in
+      // active-testing-phase.integration.test.ts, which injects a
+      // test-only fixture definition instead.
+      activeTestRegistry: [],
     });
     worker = createQueueWorker(QUEUE_NAMES.ASSESSMENT_JOBS, processor, connection, {
       concurrency: 2,
@@ -332,6 +341,42 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('assessment-processor (integration)
       .where(eq(schema.evidence.findingId, reachable!.id));
     expect(evidenceRows).toHaveLength(1);
     expect(JSON.stringify(evidenceRows[0]?.data)).not.toContain('Authorization');
+  });
+
+  it('BATCH 8: records an honest SKIPPED active test plan when zero active test definitions are registered, without affecting discovery/passive findings', async () => {
+    const asset = await createAsset();
+    const { assessment, job } = await createAssessment(asset.id, {
+      baseUrl: asset.config.baseUrl as string,
+    });
+
+    await queue.add('assessment', {
+      assessmentJobId: job.id,
+      assessmentId: assessment.id,
+      scannerName: 'WEB',
+    });
+
+    const finalAssessment = await runAndWaitForTerminalStatus(assessment.id);
+    expect(finalAssessment?.status).toBe('COMPLETED');
+
+    const [plan] = await client.db
+      .select()
+      .from(schema.activeTestPlans)
+      .where(eq(schema.activeTestPlans.assessmentId, assessment.id));
+    expect(plan?.status).toBe('SKIPPED');
+    expect(plan?.testsSelectedCount).toBe(0);
+
+    const executions = await client.db
+      .select()
+      .from(schema.activeTestExecutions)
+      .where(eq(schema.activeTestExecutions.assessmentId, assessment.id));
+    expect(executions).toHaveLength(0);
+
+    // The new phase must never affect the existing discovery/passive outcome.
+    const findings = await client.db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.assessmentId, assessment.id));
+    expect(findings.length).toBeGreaterThan(0);
   });
 
   it('refuses to execute an assessment whose asset authorization was revoked after enqueue', async () => {

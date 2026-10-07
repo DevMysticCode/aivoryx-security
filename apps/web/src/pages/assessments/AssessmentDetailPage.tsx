@@ -15,9 +15,17 @@ import { ConfirmationDialog } from '../../components/ui/ConfirmationDialog';
 import { PermissionGate } from '../../components/ui/PermissionGate';
 import { FindingsPanel } from './FindingsPanel';
 import { DiscoveryPanel } from './DiscoveryPanel';
+import { ActiveTestingPanel } from './ActiveTestingPanel';
 import type { Assessment } from '../../types/api';
 
-type Tab = 'overview' | 'findings' | 'discovery';
+type Tab = 'overview' | 'findings' | 'discovery' | 'activeTesting';
+
+const TAB_LABEL: Record<Tab, string> = {
+  overview: 'Overview',
+  findings: 'Findings',
+  discovery: 'Discovery',
+  activeTesting: 'Active Testing',
+};
 
 const CANCELLABLE_STATUSES = new Set(['QUEUED', 'RUNNING']);
 
@@ -71,18 +79,18 @@ export function AssessmentDetailPage() {
       />
 
       <div className="flex gap-1 border-b border-border">
-        {(['overview', 'findings', 'discovery'] as const).map((value) => (
+        {(['overview', 'findings', 'discovery', 'activeTesting'] as const).map((value) => (
           <button
             key={value}
             onClick={() => setTab(value)}
             className={clsx(
-              'border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors',
+              'border-b-2 px-4 py-2 text-sm font-medium transition-colors',
               tab === value
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
-            {value}
+            {TAB_LABEL[value]}
           </button>
         ))}
       </div>
@@ -126,6 +134,9 @@ export function AssessmentDetailPage() {
       {tab === 'findings' && assessmentId && <FindingsPanel assessmentId={assessmentId} />}
       {tab === 'discovery' && assessmentId && (
         <DiscoveryPanel assessmentId={assessmentId} assessmentStatus={assessment.status} />
+      )}
+      {tab === 'activeTesting' && assessmentId && (
+        <ActiveTestingPanel assessmentId={assessmentId} assessmentStatus={assessment.status} />
       )}
 
       {cancelMutation.isError && (

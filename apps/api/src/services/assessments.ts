@@ -13,6 +13,7 @@ import {
   type UrlType,
 } from '@aivoryx/shared-types';
 import type { AssessmentJobData } from '@aivoryx/queue';
+import { activeTestDefinitionAppliesTo, ACTIVE_TEST_REGISTRY } from '@aivoryx/active-testing-core';
 import { DomainError } from '../domain-errors.js';
 import { resolveTenantPrincipalForOrganization, type RequestIdentity } from '../auth/context.js';
 import type { RequestContext } from './organizations.js';
@@ -96,6 +97,31 @@ async function getAssessmentContext(
   if (!principal) return null;
 
   return { assessment: row.assessment, project: row.project, principal };
+}
+
+/** Like getAssessmentContext, but also joins the asset — needed for active-test-definitions filtering, which depends on the asset's assetType alongside the assessment's assessmentType. */
+async function getAssessmentContextWithAsset(
+  deps: AssessmentsServiceDeps,
+  identity: RequestIdentity,
+  assessmentId: string,
+) {
+  const [row] = await deps.db
+    .select({ assessment: schema.assessments, asset: schema.assets, project: schema.projects })
+    .from(schema.assessments)
+    .innerJoin(schema.assets, eq(schema.assets.id, schema.assessments.assetId))
+    .innerJoin(schema.projects, eq(schema.projects.id, schema.assessments.projectId))
+    .where(eq(schema.assessments.id, assessmentId))
+    .limit(1);
+  if (!row) return null;
+
+  const principal = await resolveTenantPrincipalForOrganization(
+    identity,
+    row.project.organizationId,
+    deps.db,
+  );
+  if (!principal) return null;
+
+  return { assessment: row.assessment, asset: row.asset, project: row.project, principal };
 }
 
 async function getFindingContext(
@@ -322,6 +348,89 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
       ]);
 
       return { items, total: totalRows[0]?.count ?? 0, limit, offset };
+    },
+
+    /**
+     * The Batch 8 active-testing plan for this assessment, or `null` when
+     * the phase hasn't run yet (the assessment is still earlier in its
+     * lifecycle) — distinct from `undefined`, which this returns for "no
+     * access/doesn't exist" (tenant isolation), mirroring getById's pattern
+     * but accommodating a third, legitimate "not started yet" state.
+     */
+    async getActiveTestPlan(identity: RequestIdentity, assessmentId: string) {
+      const context = await getAssessmentContext(deps, identity, assessmentId);
+      if (!context) return undefined;
+      if (!hasPermission(context.principal, 'activeTest:read')) return undefined;
+
+      const [plan] = await deps.db
+        .select()
+        .from(schema.activeTestPlans)
+        .where(eq(schema.activeTestPlans.assessmentId, assessmentId))
+        .limit(1);
+
+      return plan ?? null;
+    },
+
+    /**
+     * Paginated active-test executions for this assessment — read-only,
+     * scanner-generated exactly like findings/discoveredUrls (Part T).
+     */
+    async listActiveTestExecutions(
+      identity: RequestIdentity,
+      assessmentId: string,
+      filters: { limit?: number | undefined; offset?: number | undefined } = {},
+    ) {
+      const context = await getAssessmentContext(deps, identity, assessmentId);
+      if (!context) return null;
+      if (!hasPermission(context.principal, 'activeTest:read')) return null;
+
+      const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200);
+      const offset = Math.max(filters.offset ?? 0, 0);
+      const where = eq(schema.activeTestExecutions.assessmentId, assessmentId);
+
+      const [items, totalRows] = await Promise.all([
+        deps.db
+          .select()
+          .from(schema.activeTestExecutions)
+          .where(where)
+          .orderBy(asc(schema.activeTestExecutions.createdAt), asc(schema.activeTestExecutions.id))
+          .limit(limit)
+          .offset(offset),
+        deps.db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(schema.activeTestExecutions)
+          .where(where),
+      ]);
+
+      return { items, total: totalRows[0]?.count ?? 0, limit, offset };
+    },
+
+    /**
+     * Active test definitions applicable to this assessment's asset/assessment
+     * type — read from the in-memory ACTIVE_TEST_REGISTRY (empty in
+     * production this batch), never from the database; test definitions are
+     * trusted, server-side, in-code constructs, exactly like ScannerPlugin's
+     * registry (see packages/active-testing-core).
+     */
+    async listActiveTestDefinitions(identity: RequestIdentity, assessmentId: string) {
+      const context = await getAssessmentContextWithAsset(deps, identity, assessmentId);
+      if (!context) return null;
+      if (!hasPermission(context.principal, 'activeTest:read')) return null;
+
+      return ACTIVE_TEST_REGISTRY.filter((definition) =>
+        activeTestDefinitionAppliesTo(
+          definition,
+          context.asset.assetType,
+          context.assessment.assessmentType,
+        ),
+      ).map((definition) => ({
+        id: definition.id,
+        name: definition.name,
+        description: definition.description,
+        category: definition.category,
+        potentialSeverity: definition.potentialSeverity,
+        safety: definition.safety,
+      }));
     },
 
     /**

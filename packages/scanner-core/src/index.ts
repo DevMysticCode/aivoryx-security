@@ -53,3 +53,5 @@ export { computeFindingFingerprint } from './fingerprint.js';
 export type { FindingFingerprintInput } from './fingerprint.js';
 
 export { RequestLimiter } from './request-limiter.js';
+
+export { RequestScheduler } from './rate-limiter.js';

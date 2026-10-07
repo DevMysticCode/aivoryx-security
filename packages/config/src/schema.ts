@@ -90,6 +90,14 @@ export const rawEnvSchema = z
     // BullMQ jobs, not outbound requests per job). See Part S.
     SCAN_MAX_REQUESTS_PER_ASSESSMENT: intFromEnv(z.number().int().positive(), 20),
 
+    // --- Active testing (Batch 8) -------------------------------------------------
+    // Conservative defaults — this executes against real targets, just like the
+    // scanner HTTP client above, so the same "small and safe by default" posture
+    // applies. Shared across every test×target pair in one assessment's plan.
+    ACTIVE_TESTING_DEFAULT_REQUEST_BUDGET: intFromEnv(z.number().int().positive(), 50),
+    ACTIVE_TESTING_MAX_CONCURRENT_REQUESTS: intFromEnv(z.number().int().positive(), 2),
+    ACTIVE_TESTING_REQUESTS_PER_SECOND: intFromEnv(z.number().int().positive(), 2),
+
     // --- AI (optional, disabled by default) --------------------------------------
     AI_ENABLED: booleanFromEnv(false),
     AI_PROVIDER: z.enum(AI_PROVIDERS).optional(),

@@ -992,6 +992,155 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
     }, 15_000);
   });
 
+  describe('active-testing (Batch 8)', () => {
+    async function setupAssessment(label: string) {
+      const owner = await registerAndLogin(label);
+      const org = await createOrgAsOwner(owner.sessionCookie, label);
+      const auth = { cookies: { [SESSION_COOKIE_NAME]: owner.sessionCookie } };
+      const project = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        ...auth,
+        payload: { organizationId: org.id, name: label, slug: `${label}-${Date.now()}` },
+      });
+      const projectId = project.json().project.id as string;
+      const assetResponse = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assets`,
+        ...auth,
+        payload: {
+          assetType: 'WEB',
+          name: `${label} asset`,
+          config: { baseUrl: 'https://example.com' },
+        },
+      });
+      const assetId = assetResponse.json().asset.id as string;
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/assets/${assetId}`,
+        ...auth,
+        payload: { authorizationConfirmed: true },
+      });
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${projectId}/assessments`,
+        ...auth,
+        payload: { assetId, assessmentType: 'WEB' },
+      });
+      const assessmentId = created.json().assessment.id as string;
+      return { auth, assessmentId };
+    }
+
+    it('returns activeTestPlan: null when the phase has not run yet, not a 404 — the assessment itself is still accessible', async () => {
+      const { auth, assessmentId } = await setupAssessment('active-test-plan-not-started');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-plan`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ activeTestPlan: null });
+    }, 15_000);
+
+    it('returns the real plan row once the worker (simulated here by direct insert) has recorded one', async () => {
+      const { auth, assessmentId } = await setupAssessment('active-test-plan-skipped');
+      await client.db.insert(schema.activeTestPlans).values({
+        assessmentId,
+        status: 'SKIPPED',
+        requestBudget: 50,
+        testsSelectedCount: 0,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-plan`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().activeTestPlan).toMatchObject({
+        status: 'SKIPPED',
+        testsSelectedCount: 0,
+      });
+    }, 15_000);
+
+    it('lists active test executions for an assessment the caller can access, paginated', async () => {
+      const { auth, assessmentId } = await setupAssessment('active-test-executions-list');
+      const [plan] = await client.db
+        .insert(schema.activeTestPlans)
+        .values({ assessmentId, status: 'COMPLETED', requestBudget: 50, testsSelectedCount: 1 })
+        .returning();
+      await client.db.insert(schema.activeTestExecutions).values({
+        planId: plan!.id,
+        assessmentId,
+        testId: 'TEST-FIXTURE',
+        testVersion: '1.0.0',
+        target: 'https://example.com/search',
+        status: 'COMPLETED',
+        requestsUsed: 2,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-executions`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.activeTestExecutions).toHaveLength(1);
+      expect(body.activeTestExecutions[0].testId).toBe('TEST-FIXTURE');
+      expect(body.pagination).toMatchObject({ total: 1, limit: 50, offset: 0 });
+    }, 15_000);
+
+    it('returns an empty array of active test definitions — zero ship in production this batch', async () => {
+      const { auth, assessmentId } = await setupAssessment('active-test-definitions-empty');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-definitions`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ activeTestDefinitions: [] });
+    }, 15_000);
+
+    it('an organization cannot read another organization active-testing data (tenant isolation)', async () => {
+      const ownerA = await registerAndLogin('active-test-iso-a');
+      const { assessmentId } = await setupAssessment('active-test-iso-b');
+      const authA = { cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie } };
+
+      const planResponse = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-plan`,
+        ...authA,
+      });
+      expect(planResponse.statusCode).toBe(404);
+
+      const executionsResponse = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-executions`,
+        ...authA,
+      });
+      expect(executionsResponse.statusCode).toBe(404);
+
+      const definitionsResponse = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-definitions`,
+        ...authA,
+      });
+      expect(definitionsResponse.statusCode).toBe(404);
+    }, 15_000);
+
+    it('exposes no route to create, update, or delete an active test plan or execution', async () => {
+      const { auth } = await setupAssessment('active-test-immutable');
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/v1/active-test-executions',
+        ...auth,
+        payload: {},
+      });
+      expect(create.statusCode).toBe(404);
+    }, 15_000);
+  });
+
   describe('legacy API-key path (Batch 2 behavior preserved)', () => {
     it('an API key still authenticates and is tenant-isolated', async () => {
       const owner = await registerAndLogin('legacy-key-owner');

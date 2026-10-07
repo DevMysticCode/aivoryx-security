@@ -10,6 +10,7 @@
     { "path": "packages/db" },
     { "path": "packages/queue" },
     { "path": "packages/scanner-core" },
+    { "path": "packages/active-testing-core" },
     { "path": "packages/scanners/http-reachability" },
     { "path": "packages/scanners/web-passive" },
     { "path": "packages/scanners/web-discovery" },

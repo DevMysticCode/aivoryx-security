@@ -26,6 +26,8 @@ export const PERMISSIONS = [
   'finding:read',
   'finding:update',
 
+  'activeTest:read',
+
   'billing:read',
   'billing:manage',
 
