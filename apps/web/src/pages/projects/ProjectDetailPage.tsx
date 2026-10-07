@@ -7,6 +7,7 @@ import { PageHeader } from '../../components/layout/PageHeader';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import { Card, CardContent } from '../../components/ui/Card';
+import { Badge } from '../../components/ui/Badge';
 import clsx from 'clsx';
 import { AssetsPanel } from '../assets/AssetsPanel';
 import type { Project } from '../../types/api';
@@ -57,7 +58,11 @@ export function ProjectDetailPage() {
               <dt className="text-muted-foreground">Slug</dt>
               <dd className="text-foreground">{project.slug}</dd>
               <dt className="text-muted-foreground">Status</dt>
-              <dd className="text-foreground">{project.status}</dd>
+              <dd>
+                <Badge tone={project.status === 'active' ? 'success' : 'neutral'}>
+                  {project.status}
+                </Badge>
+              </dd>
               <dt className="text-muted-foreground">Created</dt>
               <dd className="text-foreground">{new Date(project.createdAt).toLocaleString()}</dd>
             </dl>

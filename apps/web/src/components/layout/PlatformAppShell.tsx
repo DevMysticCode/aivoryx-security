@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Sidebar, type SidebarItem } from './Sidebar';
 import { TopBar } from './TopBar';
@@ -9,6 +10,8 @@ const NAV_ITEMS: SidebarItem[] = [
 ];
 
 export function PlatformAppShell() {
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
   return (
     <div className="flex min-h-screen bg-background">
       <Sidebar
@@ -18,9 +21,12 @@ export function PlatformAppShell() {
             Aivoryx <span className="text-muted-foreground">Platform</span>
           </span>
         }
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
       />
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <TopBar
+          onMenuClick={() => setIsSidebarOpen(true)}
           left={
             <span className="text-sm font-medium text-muted-foreground">
               Platform Administration
@@ -28,7 +34,7 @@ export function PlatformAppShell() {
           }
           right={<UserMenu />}
         />
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden">
           <Outlet />
         </main>
       </div>

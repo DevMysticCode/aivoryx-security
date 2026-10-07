@@ -31,6 +31,7 @@ export function AppRouter() {
           <Route path="/platform" element={<PlatformAppShell />}>
             <Route index element={<PlatformDashboardPage />} />
             <Route path="organizations" element={<PlatformOrganizationsPage />} />
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Route>
 
@@ -45,6 +46,7 @@ export function AppRouter() {
             <Route path="team" element={<TeamPage />} />
             <Route path="settings" element={<OrganizationSettingsPage />} />
             <Route path="reports" element={<ReportsPage />} />
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Route>
       </Route>

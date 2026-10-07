@@ -97,7 +97,7 @@ export function BrandingSection({ organization }: { organization: Organization }
               </p>
             }
           >
-            <Button type="submit" isLoading={mutation.isPending}>
+            <Button type="submit" isLoading={mutation.isPending} className="self-start">
               Save branding
             </Button>
           </PermissionGate>

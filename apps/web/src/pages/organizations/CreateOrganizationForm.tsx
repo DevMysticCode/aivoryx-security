@@ -58,7 +58,7 @@ export function CreateOrganizationForm() {
           id="org-slug"
           value={slug}
           required
-          pattern="[a-z0-9][a-z0-9-]*"
+          pattern="[a-z0-9][a-z0-9\-]*"
           onChange={(event) => {
             setSlugTouched(true);
             setSlug(event.target.value);

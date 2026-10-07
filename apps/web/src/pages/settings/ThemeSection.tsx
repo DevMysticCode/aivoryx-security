@@ -82,14 +82,17 @@ export function ThemeSection({ organization }: { organization: Organization }) {
               label="Primary"
               value={form.primaryColor}
               onChange={(value) => setForm((f) => ({ ...f, primaryColor: value }))}
+              defaultSwatch="#00A19A"
             />
             <ColorField
               label="Secondary"
               value={form.secondaryColor}
               onChange={(value) => setForm((f) => ({ ...f, secondaryColor: value }))}
+              defaultSwatch="#231D45"
             />
             <ColorField
               label="Accent"
+              defaultSwatch="#C18A38"
               value={form.accentColor}
               onChange={(value) => setForm((f) => ({ ...f, accentColor: value }))}
             />
@@ -103,7 +106,7 @@ export function ThemeSection({ organization }: { organization: Organization }) {
               </p>
             }
           >
-            <Button type="submit" isLoading={mutation.isPending}>
+            <Button type="submit" isLoading={mutation.isPending} className="self-start">
               Save theme
             </Button>
           </PermissionGate>

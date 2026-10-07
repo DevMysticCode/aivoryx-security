@@ -124,7 +124,9 @@ export function AssessmentDetailPage() {
       )}
 
       {tab === 'findings' && assessmentId && <FindingsPanel assessmentId={assessmentId} />}
-      {tab === 'discovery' && assessmentId && <DiscoveryPanel assessmentId={assessmentId} />}
+      {tab === 'discovery' && assessmentId && (
+        <DiscoveryPanel assessmentId={assessmentId} assessmentStatus={assessment.status} />
+      )}
 
       {cancelMutation.isError && (
         <Alert tone="destructive">{errorMessage(cancelMutation.error)}</Alert>

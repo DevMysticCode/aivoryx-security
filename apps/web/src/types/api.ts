@@ -60,6 +60,8 @@ export interface Member {
   id: string;
   organizationId: string;
   userId: string;
+  email: string;
+  name: string | null;
   role: OrganizationRole;
   status: string;
   createdAt: string;

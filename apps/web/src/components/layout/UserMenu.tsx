@@ -30,7 +30,7 @@ export function UserMenu() {
         <option value="light">Light</option>
         <option value="dark">Dark</option>
       </Select>
-      <div className="text-right">
+      <div className="hidden text-right sm:block">
         <p className="text-sm font-medium leading-none text-foreground">
           {user?.name ?? user?.email}
         </p>

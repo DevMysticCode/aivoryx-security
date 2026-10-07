@@ -7,11 +7,17 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { DataTable } from '../../components/ui/DataTable';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
-import type { DiscoveredUrl } from '../../types/api';
+import type { AssessmentStatus, DiscoveredUrl } from '../../types/api';
 
 const PAGE_SIZE = 25;
 
-export function DiscoveryPanel({ assessmentId }: { assessmentId: string }) {
+export function DiscoveryPanel({
+  assessmentId,
+  assessmentStatus,
+}: {
+  assessmentId: string;
+  assessmentStatus: AssessmentStatus;
+}) {
   const [offset, setOffset] = useState(0);
 
   const query = useQuery({
@@ -26,10 +32,15 @@ export function DiscoveryPanel({ assessmentId }: { assessmentId: string }) {
   if (query.isLoading) return <LoadingState label="Loading discovered attack surface…" />;
   if (query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   if (!query.data || query.data.discoveredUrls.length === 0) {
+    const stillRunning = assessmentStatus === 'QUEUED' || assessmentStatus === 'RUNNING';
     return (
       <EmptyState
-        title="Nothing discovered yet"
-        description="Discovery runs automatically as part of a Web assessment — check back once it's running."
+        title="Nothing discovered"
+        description={
+          stillRunning
+            ? "Discovery runs automatically as part of a Web assessment — check back once it's running."
+            : 'This assessment finished without discovering any pages — check the Overview tab for why (for example, the target may have been unreachable).'
+        }
       />
     );
   }

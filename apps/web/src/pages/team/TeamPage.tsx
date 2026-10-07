@@ -74,7 +74,7 @@ export function TeamPage() {
         description="Manage who has access to this organization."
         actions={
           <PermissionGate permission="member:invite">
-            <Button onClick={() => setIsInviteOpen(true)}>Invite member</Button>
+            <Button onClick={() => setIsInviteOpen(true)}>Add member</Button>
           </PermissionGate>
         }
       />
@@ -95,7 +95,12 @@ export function TeamPage() {
           columns={[
             {
               header: 'Member',
-              render: (member) => <span className="font-mono text-xs">{member.userId}</span>,
+              render: (member) => (
+                <div>
+                  <p className="font-medium text-foreground">{member.name || member.email}</p>
+                  {member.name && <p className="text-xs text-muted-foreground">{member.email}</p>}
+                </div>
+              ),
             },
             {
               header: 'Role',
@@ -139,7 +144,7 @@ export function TeamPage() {
         />
       )}
 
-      <Modal open={isInviteOpen} onClose={() => setIsInviteOpen(false)} title="Invite member">
+      <Modal open={isInviteOpen} onClose={() => setIsInviteOpen(false)} title="Add team member">
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -147,7 +152,11 @@ export function TeamPage() {
           }}
           className="flex flex-col gap-4"
         >
-          <FormField label="Email" htmlFor="invite-email">
+          <FormField
+            label="Email"
+            htmlFor="invite-email"
+            hint="They must already have an Aivoryx Security account — there's no email invitation yet."
+          >
             <TextInput
               id="invite-email"
               type="email"
@@ -173,7 +182,7 @@ export function TeamPage() {
             <Alert tone="destructive">{errorMessage(inviteMutation.error)}</Alert>
           )}
           <Button type="submit" isLoading={inviteMutation.isPending}>
-            Send invite
+            Add member
           </Button>
         </form>
       </Modal>

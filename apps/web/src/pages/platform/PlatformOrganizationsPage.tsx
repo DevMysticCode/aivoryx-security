@@ -66,7 +66,11 @@ export function PlatformOrganizationsPage() {
             <dt className="text-muted-foreground">Slug</dt>
             <dd className="text-foreground">{selected.slug}</dd>
             <dt className="text-muted-foreground">Status</dt>
-            <dd className="text-foreground">{selected.status}</dd>
+            <dd>
+              <Badge tone={selected.status === 'active' ? 'success' : 'neutral'}>
+                {selected.status}
+              </Badge>
+            </dd>
             <dt className="text-muted-foreground">Website</dt>
             <dd className="text-foreground">{selected.website || '—'}</dd>
             <dt className="text-muted-foreground">Industry</dt>
