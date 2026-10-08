@@ -197,6 +197,9 @@ importers:
       '@aivoryx/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@aivoryx/scanner-active-xss':
+        specifier: workspace:*
+        version: link:../../packages/scanners/active-xss
       '@aivoryx/scanner-core':
         specifier: workspace:*
         version: link:../../packages/scanner-core
@@ -369,6 +372,31 @@ importers:
       '@aivoryx/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.4)(jsdom@25.0.1(supports-color@7.2.0))(supports-color@7.2.0)
+
+  packages/scanners/active-xss:
+    dependencies:
+      '@aivoryx/active-testing-core':
+        specifier: workspace:*
+        version: link:../../active-testing-core
+      '@aivoryx/scanner-core':
+        specifier: workspace:*
+        version: link:../../scanner-core
+      '@aivoryx/shared-types':
+        specifier: workspace:*
+        version: link:../../shared-types
+      htmlparser2:
+        specifier: ^12.0.0
+        version: 12.0.0
     devDependencies:
       '@types/node':
         specifier: ^22.7.5

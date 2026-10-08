@@ -28,6 +28,18 @@ export interface ActiveTestingPhaseDeps {
 const MAX_ERROR_MESSAGE_LENGTH = 2000;
 
 /**
+ * Bounds how many discovered pages become active-testing baseline targets —
+ * a site with hundreds of discovered pages must not turn active testing
+ * into unbounded traffic (the plan-level request budget is the ultimate
+ * backstop, but this keeps targeting itself bounded too). URLs that
+ * actually carry a query string are prioritized first, since those are the
+ * ones any mutation-based scanner can meaningfully test — a generic,
+ * framework-level heuristic, not XSS-specific. Local constant, same
+ * precedent as web-discovery's DEFAULT_CRAWL_LIMITS.
+ */
+const MAX_BASELINE_TARGETS = 25;
+
+/**
  * Runs after the existing scanner-plugin loop (discovery/passive analysis)
  * completes. Zero active test definitions ship in production this batch
  * (see packages/active-testing-core's ACTIVE_TEST_REGISTRY), so in practice
@@ -93,7 +105,12 @@ export async function runActiveTestingPhase(
       ),
     )
     .orderBy(asc(schema.discoveredUrls.createdAt), asc(schema.discoveredUrls.id));
-  const baselineTargets = discoveredPages.map((row) => ({ url: row.url, method: 'GET' as const }));
+
+  const withQueryString = discoveredPages.filter((row) => row.url.includes('?'));
+  const withoutQueryString = discoveredPages.filter((row) => !row.url.includes('?'));
+  const baselineTargets = [...withQueryString, ...withoutQueryString]
+    .slice(0, MAX_BASELINE_TARGETS)
+    .map((row) => ({ url: row.url, method: 'GET' as const }));
 
   try {
     const result = await runActiveTestPlan({
@@ -160,9 +177,12 @@ async function persistExecution(
       target: execution.target,
       status: execution.status,
       requestsUsed: execution.requestsUsed,
-      mutation: execution.mutation,
+      mutation: {
+        mutationsAttempted: execution.mutationsAttempted,
+        findingsReported: execution.findingsReported,
+      },
       baseline: execution.baseline,
-      result: execution.result,
+      result: { attempts: execution.mutationResults },
       errorMessage: execution.errorMessage ?? null,
       durationMs: execution.durationMs,
       completedAt: new Date(),

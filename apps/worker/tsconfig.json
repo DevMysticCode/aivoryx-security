@@ -15,6 +15,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/scanner-core" },
     { "path": "../../packages/active-testing-core" },
-    { "path": "../../packages/scanners/web-discovery" }
+    { "path": "../../packages/scanners/web-discovery" },
+    { "path": "../../packages/scanners/active-xss" }
   ]
 }

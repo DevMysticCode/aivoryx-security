@@ -123,7 +123,79 @@ describe('runActiveTestPlan', () => {
     expect(findings[0]!.target).toContain('AIVORYX_TEST_MARKER');
     expect(executions).toHaveLength(1);
     expect(executions[0]!.status).toBe('COMPLETED');
-    expect(executions[0]!.findingCandidate).not.toBeNull();
+    expect(executions[0]!.mutationsAttempted).toBe(1);
+    expect(executions[0]!.findingsReported).toBe(1);
+    expect(executions[0]!.mutationResults).toHaveLength(1);
+    expect(executions[0]!.mutationResults[0]!.findingKey).toBe('reflected-marker');
+    // The raw response body is never present in anything the executor hands
+    // back for persistence — only summarized facts (see summarizeObservation).
+    expect(JSON.stringify(executions[0])).not.toContain('query was');
+  });
+
+  it('tests every mutation independently and reports a finding for EACH one that classifies positively — never stopping at the first hit', async () => {
+    // Reflects BOTH `q` and `other` independently, so a mutation targeting
+    // either parameter alone produces a genuine, independent reflection —
+    // proving two separately-vulnerable parameters both get found, not just
+    // whichever one happens to be tried first.
+    const twoParamServer = await startServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const q = url.searchParams.get('q') ?? '';
+      const other = url.searchParams.get('other') ?? '';
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<html><body>q was: ${q} / other was: ${other}</body></html>`);
+    });
+
+    try {
+      const findings: ReportFindingInput[] = [];
+      const executions: ActiveTestExecutionResult[] = [];
+
+      const multiParam = fixtureDefinition({
+        mutations: () => [
+          { kind: 'query-param', name: 'q', value: 'AIVORYX_TEST_MARKER' },
+          { kind: 'query-param', name: 'other', value: 'AIVORYX_TEST_MARKER' },
+        ],
+        classify: (diff, _baseline, _mutated, mutation) =>
+          diff.markersDetected.length > 0 && mutation.kind === 'query-param'
+            ? {
+                title: 'Reflected marker',
+                description: 'The marker was reflected unescaped',
+                severity: 'MEDIUM',
+                confidence: 'HIGH',
+                key: `reflected-marker:${mutation.name}`,
+              }
+            : null,
+      });
+
+      const result = await runActiveTestPlan({
+        baselineTargets: [{ url: `http://127.0.0.1:${twoParamServer.port}/search`, method: 'GET' }],
+        definitions: [multiParam],
+        httpClient: buildClient(),
+        scope: scopeFor(twoParamServer.port),
+        logger: noopLogger,
+        signal: new AbortController().signal,
+        requestBudget: 50,
+        maxConcurrentRequests: 2,
+        requestsPerSecond: 50,
+        reportFinding: async (input) => {
+          findings.push(input);
+        },
+        onExecution: async (execution) => {
+          executions.push(execution);
+        },
+      });
+
+      expect(result.status).toBe('COMPLETED');
+      expect(findings).toHaveLength(2);
+      expect(findings.map((f) => f.key).sort()).toEqual([
+        'TEST-REFLECTION:reflected-marker:other',
+        'TEST-REFLECTION:reflected-marker:q',
+      ]);
+      expect(executions).toHaveLength(1);
+      expect(executions[0]!.mutationsAttempted).toBe(2);
+      expect(executions[0]!.findingsReported).toBe(2);
+    } finally {
+      twoParamServer.server.close();
+    }
   });
 
   it('reports no finding when the marker is never reflected', async () => {

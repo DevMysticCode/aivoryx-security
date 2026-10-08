@@ -18,6 +18,7 @@
     "@aivoryx/db": "workspace:*",
     "@aivoryx/logger": "workspace:*",
     "@aivoryx/queue": "workspace:*",
+    "@aivoryx/scanner-active-xss": "workspace:*",
     "@aivoryx/scanner-core": "workspace:*",
     "@aivoryx/scanner-web-discovery": "workspace:*",
     "@aivoryx/shared-types": "workspace:*",

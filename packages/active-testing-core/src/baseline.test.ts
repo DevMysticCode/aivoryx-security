@@ -29,9 +29,9 @@ describe('captureObservation', () => {
     expect(observation.bodyLength).toBe('<html>hello</html>'.length);
   });
 
-  it('never includes the raw response body', () => {
-    const observation = captureObservation(fakeResponse(), []);
-    expect(JSON.stringify(observation)).not.toContain('hello');
+  it('includes the raw decoded body for classify()-time analysis (never auto-persisted — see executor.ts summarizeObservation)', () => {
+    const observation = captureObservation(fakeResponse({ body: '<html>hello</html>' }), []);
+    expect(observation.body).toBe('<html>hello</html>');
   });
 
   it('produces the same bodyHash for identical bodies and a different hash for different bodies', () => {

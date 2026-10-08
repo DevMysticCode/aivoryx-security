@@ -4,9 +4,10 @@ import type { Observation } from './types.js';
 
 /**
  * Captures the structured facts about a SafeHttpClient response that the
- * diff engine needs — never the raw body itself (see Observation's
- * bodyHash/markersFound). `markers` are scanned for in-memory only, at
- * capture time; nothing beyond their presence/absence is ever persisted.
+ * diff engine needs, plus the raw decoded body for classify()'s in-process
+ * use (see Observation). `markers` are scanned for in-memory only, at
+ * capture time; nothing beyond their presence/absence — and nothing from
+ * `body` — is ever persisted (see executor.ts's summarizeObservation()).
  */
 export function captureObservation(
   response: SafeHttpResponse,
@@ -22,5 +23,6 @@ export function captureObservation(
     bodyLength: response.body.length,
     bodyHash,
     markersFound,
+    body: response.body,
   };
 }

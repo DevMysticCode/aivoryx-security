@@ -12,12 +12,10 @@ import { ActiveTestBudget } from './budget.js';
 import type {
   ActiveTestDefinition,
   ActiveTestExecutionResult,
-  ActiveTestFindingCandidate,
+  ActiveTestMutationAttempt,
   ActiveTestPlanResult,
   BaselineRequestSpec,
   Observation,
-  ObservationDiff,
-  RequestMutation,
 } from './types.js';
 
 export interface ActiveTestExecutorContext {
@@ -67,10 +65,10 @@ async function runOnePair(
       target: target.url,
       status: 'CANCELLED',
       requestsUsed: 0,
-      mutation: null,
+      mutationsAttempted: 0,
+      findingsReported: 0,
+      mutationResults: [],
       baseline: null,
-      result: null,
-      findingCandidate: null,
       durationMs: Date.now() - startedAt,
     };
   }
@@ -99,10 +97,10 @@ async function runOnePair(
         target: target.url,
         status: 'FAILED',
         requestsUsed,
-        mutation: null,
+        mutationsAttempted: 0,
+        findingsReported: 0,
+        mutationResults: [],
         baseline: null,
-        result: null,
-        findingCandidate: null,
         errorMessage: error instanceof Error ? error.message : String(error),
         durationMs: Date.now() - startedAt,
       };
@@ -112,9 +110,8 @@ async function runOnePair(
   }
 
   const mutations = definition.mutations(target);
-  let mutationUsed: RequestMutation | null = null;
-  let diffFacts: ObservationDiff | null = null;
-  let findingCandidate: ActiveTestFindingCandidate | null = null;
+  const mutationResults: ActiveTestMutationAttempt[] = [];
+  let findingsReported = 0;
 
   for (const mutation of mutations) {
     if (context.signal.aborted) break;
@@ -134,16 +131,37 @@ async function runOnePair(
         { method: definition.httpMethod },
       );
       requestsUsed += 1;
-      const observation = captureObservation(mutatedResponse, definition.markers);
+      const observation = captureObservation(
+        mutatedResponse,
+        mutation.markers ?? definition.markers,
+      );
       const diff = diffObservations(baselineObservation, observation);
-      const candidate = definition.classify(diff, baselineObservation, observation);
+      const candidate = definition.classify(diff, baselineObservation, observation, mutation);
 
+      let findingKey: string | null = null;
       if (candidate) {
-        mutationUsed = mutation;
-        diffFacts = diff;
-        findingCandidate = candidate;
-        break;
+        findingKey = candidate.key;
+        findingsReported += 1;
+        const reportInput: ReportFindingInput = {
+          title: candidate.title,
+          description: candidate.description,
+          severity: candidate.severity,
+          confidence: candidate.confidence,
+          category: 'active-test',
+          key: `${definition.id}:${candidate.key}`,
+          target: mutatedUrl.toString(),
+          evidence: {
+            ...candidate.evidence,
+            diff: { ...diff },
+            baseline: summarizeObservation(baselineObservation),
+          },
+        };
+        if (candidate.remediation !== undefined) reportInput.remediation = candidate.remediation;
+        if (candidate.references !== undefined) reportInput.references = candidate.references;
+        await context.reportFinding(reportInput);
       }
+
+      mutationResults.push({ mutation: { ...mutation }, result: { ...diff }, findingKey });
     } catch (error) {
       // A single mutation's request failing (timeout, resource limit) doesn't
       // fail the whole pair — other mutations may still succeed. Logged for
@@ -153,29 +171,10 @@ async function runOnePair(
         { testId: definition.id, target: target.url, err: String(error) },
         'active test mutation request failed; continuing to next mutation',
       );
+      mutationResults.push({ mutation: { ...mutation }, result: null, findingKey: null });
     } finally {
       release();
     }
-  }
-
-  const resultFacts = diffFacts ? { ...diffFacts } : null;
-
-  if (findingCandidate && mutationUsed && resultFacts) {
-    const reportInput: ReportFindingInput = {
-      title: findingCandidate.title,
-      description: findingCandidate.description,
-      severity: findingCandidate.severity,
-      confidence: findingCandidate.confidence,
-      category: 'active-test',
-      key: `${definition.id}:${findingCandidate.key}`,
-      target: applyMutation(new URL(target.url), mutationUsed).toString(),
-      evidence: { diff: resultFacts, baseline: summarizeObservation(baselineObservation) },
-    };
-    if (findingCandidate.remediation !== undefined)
-      reportInput.remediation = findingCandidate.remediation;
-    if (findingCandidate.references !== undefined)
-      reportInput.references = findingCandidate.references;
-    await context.reportFinding(reportInput);
   }
 
   return {
@@ -184,10 +183,10 @@ async function runOnePair(
     target: target.url,
     status: 'COMPLETED',
     requestsUsed,
-    mutation: mutationUsed ? { ...mutationUsed } : null,
+    mutationsAttempted: mutationResults.length,
+    findingsReported,
+    mutationResults,
     baseline: summarizeObservation(baselineObservation),
-    result: resultFacts,
-    findingCandidate: findingCandidate ?? null,
     durationMs: Date.now() - startedAt,
   };
 }
@@ -234,10 +233,10 @@ export async function runActiveTestPlan(
         target: target.url,
         status: stoppedEarly,
         requestsUsed: 0,
-        mutation: null,
+        mutationsAttempted: 0,
+        findingsReported: 0,
+        mutationResults: [],
         baseline: null,
-        result: null,
-        findingCandidate: null,
         durationMs: 0,
       });
       continue;
@@ -259,10 +258,10 @@ export async function runActiveTestPlan(
           target: target.url,
           status: 'BUDGET_EXHAUSTED',
           requestsUsed: 0,
-          mutation: null,
+          mutationsAttempted: 0,
+          findingsReported: 0,
+          mutationResults: [],
           baseline: null,
-          result: null,
-          findingCandidate: null,
           durationMs: 0,
         });
         continue;
