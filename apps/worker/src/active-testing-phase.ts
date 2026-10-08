@@ -161,13 +161,22 @@ export async function runActiveTestingPhase(
   }
 }
 
+/**
+ * Persists one execution row, plus a link to every finding it produced
+ * (Batch 10 — see active_test_execution_findings). Idempotent end to end:
+ * if the execution row already exists (a BullMQ retry re-delivering the
+ * same pair), its id is looked up instead so the finding links can still
+ * be (re-)established — themselves idempotent via onConflictDoNothing on
+ * the unique (execution, finding) pair — rather than silently skipping
+ * linkage just because the execution row itself wasn't newly inserted.
+ */
 async function persistExecution(
   deps: ActiveTestingPhaseDeps,
   planId: string,
   assessmentId: string,
   execution: ActiveTestExecutionResult,
 ): Promise<void> {
-  await deps.db
+  const [inserted] = await deps.db
     .insert(schema.activeTestExecutions)
     .values({
       planId,
@@ -176,6 +185,9 @@ async function persistExecution(
       testVersion: execution.testVersion,
       target: execution.target,
       status: execution.status,
+      securityResult: execution.securityResult,
+      skipReason: execution.skipReason ?? null,
+      failureReason: execution.failureReason ?? null,
       requestsUsed: execution.requestsUsed,
       mutation: {
         mutationsAttempted: execution.mutationsAttempted,
@@ -193,5 +205,51 @@ async function persistExecution(
         schema.activeTestExecutions.testId,
         schema.activeTestExecutions.target,
       ],
-    });
+    })
+    .returning({ id: schema.activeTestExecutions.id });
+
+  let executionId = inserted?.id;
+  if (!executionId) {
+    const [existing] = await deps.db
+      .select({ id: schema.activeTestExecutions.id })
+      .from(schema.activeTestExecutions)
+      .where(
+        and(
+          eq(schema.activeTestExecutions.planId, planId),
+          eq(schema.activeTestExecutions.testId, execution.testId),
+          eq(schema.activeTestExecutions.target, execution.target),
+        ),
+      )
+      .limit(1);
+    executionId = existing?.id;
+  }
+
+  const findingIds = execution.mutationResults
+    .map((attempt) => attempt.findingId)
+    .filter((id): id is string => id !== null);
+
+  if (executionId && findingIds.length > 0) {
+    await deps.db
+      .insert(schema.activeTestExecutionFindings)
+      .values(findingIds.map((findingId) => ({ executionId: executionId!, findingId })))
+      .onConflictDoNothing({
+        target: [
+          schema.activeTestExecutionFindings.executionId,
+          schema.activeTestExecutionFindings.findingId,
+        ],
+      });
+  }
+
+  deps.logger.info(
+    {
+      executionId,
+      testId: execution.testId,
+      status: execution.status,
+      securityResult: execution.securityResult,
+      requestsUsed: execution.requestsUsed,
+      findingsReported: execution.findingsReported,
+      durationMs: execution.durationMs,
+    },
+    'active test execution persisted',
+  );
 }

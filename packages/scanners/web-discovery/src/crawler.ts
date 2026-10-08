@@ -31,7 +31,7 @@ export interface WebDiscoveryContext {
   scope: AssessmentScope;
   assetType: AssetType;
   logger: ScannerLogger;
-  reportFinding: (input: ReportFindingInput) => Promise<void>;
+  reportFinding: (input: ReportFindingInput) => Promise<string | null>;
   reportDiscoveredUrl: (input: ReportDiscoveredUrlInput) => Promise<void>;
 }
 

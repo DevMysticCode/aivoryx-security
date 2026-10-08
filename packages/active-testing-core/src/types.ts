@@ -7,6 +7,38 @@ import type {
 import type { WorkerCapability } from '@aivoryx/scanner-core';
 
 /**
+ * The security verdict, independent of whether the execution itself
+ * completed successfully (see ActiveTestExecutionResult.status, the
+ * "execution outcome"). Batch 10: these are deliberately two separate
+ * axes — "the test ran fine and found nothing" (COMPLETED + NO_FINDING) is
+ * not the same fact as "the test could not be run" (FAILED + INCONCLUSIVE).
+ */
+export const SECURITY_RESULTS = ['NO_FINDING', 'FINDING', 'INCONCLUSIVE'] as const;
+export type SecurityResult = (typeof SECURITY_RESULTS)[number];
+
+/** Why an execution was SKIPPED rather than attempted. */
+export const SKIP_REASONS = [
+  'NO_ELIGIBLE_TARGETS',
+  'NO_PARAMETERS',
+  'UNSUPPORTED_CONTENT_TYPE',
+  'LIMIT_REACHED',
+  'UNSUPPORTED_ASSET_TYPE',
+  'MISSING_CAPABILITY',
+] as const;
+export type SkipReason = (typeof SKIP_REASONS)[number];
+
+/** Why an execution FAILED — a small, bounded, user-safe vocabulary; never a raw stack trace (those stay in server logs only). */
+export const FAILURE_REASONS = [
+  'NETWORK_ERROR',
+  'SCOPE_REJECTED',
+  'SSRF_REJECTED',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+  'INVALID_TEST_CONFIGURATION',
+] as const;
+export type FailureReason = (typeof FAILURE_REASONS)[number];
+
+/**
  * Only SAFE_READ_ONLY is a constructible value this batch — the type is a
  * single-member literal, not a broader union, so a future test definition
  * cannot accidentally declare itself state-changing. POTENTIALLY_STATE_CHANGING
@@ -102,6 +134,22 @@ export interface ActiveTestFindingCandidate {
 }
 
 /**
+ * The full, structured outcome of classifying one mutation's observation —
+ * what a test definition's classify() returns (Batch 10). Deliberately a
+ * discriminated union rather than `ActiveTestFindingCandidate | null`: a
+ * definition must say explicitly whether it found nothing (confidently) or
+ * could not determine an answer at all (INCONCLUSIVE) — these are different
+ * facts for reporting (see Batch 10 spec Part 5/17). Most definitions will
+ * only ever produce NO_FINDING/FINDING; INCONCLUSIVE exists for a future
+ * scanner that genuinely needs it (e.g. one whose evidence was ambiguous)
+ * and is not used by WEB-REFLECTED-XSS today.
+ */
+export type ActiveTestClassification =
+  | { securityResult: 'FINDING'; candidate: ActiveTestFindingCandidate }
+  | { securityResult: 'NO_FINDING' }
+  | { securityResult: 'INCONCLUSIVE'; reason: string };
+
+/**
  * A reusable, server-side-trusted definition of one active test. User input
  * selects/configures which definitions run against an assessment — it never
  * supplies executable test logic (see registry.ts). mutations()/classify()
@@ -129,20 +177,21 @@ export interface ActiveTestDefinition {
   /** Generates the controlled mutations to try against one baseline target. Pure — no I/O. */
   mutations: (baseline: BaselineRequestSpec) => RequestMutation[];
   /**
-   * Interprets diff facts into an optional finding candidate. Pure — no I/O,
-   * no vulnerability verdict logic lives in the generic diff engine
-   * (diff.ts). Receives the specific `mutation` that produced `mutated` —
-   * added in Batch 9 so a definition whose mutations carry per-parameter
-   * state (e.g. which query parameter, which canary) can build a
-   * parameter-specific finding key/evidence without the generic framework
-   * needing to know anything about parameters itself.
+   * Interprets diff facts into a structured classification (Batch 10: see
+   * ActiveTestClassification — always returns a definite answer, never
+   * bare `null`). Pure — no I/O, no vulnerability verdict logic lives in
+   * the generic diff engine (diff.ts). Receives the specific `mutation`
+   * that produced `mutated` — added in Batch 9 so a definition whose
+   * mutations carry per-parameter state (e.g. which query parameter, which
+   * canary) can build a parameter-specific finding key/evidence without the
+   * generic framework needing to know anything about parameters itself.
    */
   classify: (
     diff: ObservationDiff,
     baseline: Observation,
     mutated: Observation,
     mutation: RequestMutation,
-  ) => ActiveTestFindingCandidate | null;
+  ) => ActiveTestClassification;
 }
 
 export interface ActiveTestPlanResult {
@@ -151,16 +200,27 @@ export interface ActiveTestPlanResult {
   testsCompletedCount: number;
   testsFailedCount: number;
   testsSkippedCount: number;
+  /**
+   * Authoritative — read directly from the shared ActiveTestBudget's own
+   * counter (Batch 10), not re-summed from each execution's own
+   * requestsUsed. Every committed budget reservation corresponds to exactly
+   * one real request attempt (see budget.ts's tryConsume/hasCapacity), so
+   * this value can never under- or over-count regardless of how any
+   * individual execution terminated.
+   */
   requestsUsed: number;
   errorMessage?: string;
 }
 
-/** One mutation actually attempted within an execution, and whether it produced a finding. Bounded by however many mutations definition.mutations() returned — callers (e.g. reflected-XSS) are responsible for capping that list. */
+/** One mutation actually attempted within an execution, and what it produced. Bounded by however many mutations definition.mutations() returned — callers (e.g. reflected-XSS) are responsible for capping that list. */
 export interface ActiveTestMutationAttempt {
   mutation: Record<string, unknown>;
   result: Record<string, unknown> | null;
-  /** The finding candidate's key, if this mutation produced one — null otherwise. The finding itself was already reported via reportFinding(); this is just a cross-reference for the execution-row summary. */
+  securityResult: SecurityResult;
+  /** The finding candidate's key, if this mutation produced one — null otherwise. */
   findingKey: string | null;
+  /** The persisted finding's id (see ScannerContext.reportFinding), if this mutation produced one — null otherwise. Used to populate active_test_execution_findings. */
+  findingId: string | null;
 }
 
 export interface ActiveTestExecutionResult {
@@ -168,6 +228,18 @@ export interface ActiveTestExecutionResult {
   testVersion: string;
   target: string;
   status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'BUDGET_EXHAUSTED' | 'SKIPPED';
+  /**
+   * The security verdict for this execution as a whole — independent of
+   * `status` (Batch 10 spec Part 5). Only meaningful when status is
+   * COMPLETED (derived from mutationResults) or FAILED (always
+   * INCONCLUSIVE — the scanner could not determine an answer); `null` for
+   * CANCELLED/BUDGET_EXHAUSTED/SKIPPED, where no security judgement was
+   * ever reached ("not applicable", not "no finding").
+   */
+  securityResult: SecurityResult | null;
+  skipReason?: SkipReason;
+  failureReason?: FailureReason;
+  /** Authoritative count of real requests this execution issued — accurate even when it stopped early (BUDGET_EXHAUSTED mid-pair no longer discards this; see executor.ts). */
   requestsUsed: number;
   mutationsAttempted: number;
   findingsReported: number;

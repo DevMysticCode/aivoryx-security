@@ -262,12 +262,19 @@ export function createAssessmentJobProcessor(deps: AssessmentProcessorDeps) {
   };
 }
 
+/**
+ * Returns the created finding's id, or (on a fingerprint conflict — a
+ * retried job reporting the same observation again, see Part O) the
+ * pre-existing finding's id via one extra SELECT, so callers can still link
+ * to it. Never returns null except in the pathological case the row can be
+ * found by neither path.
+ */
 async function persistFinding(
   deps: AssessmentProcessorDeps,
   assessmentId: string,
   scannerName: string,
   input: ReportFindingInput,
-): Promise<void> {
+): Promise<string | null> {
   const fingerprint = computeFindingFingerprint({
     assessmentId,
     scanner: scannerName,
@@ -295,13 +302,29 @@ async function persistFinding(
     .onConflictDoNothing({ target: [schema.findings.assessmentId, schema.findings.fingerprint] })
     .returning();
 
-  // A conflict (finding already exists) is expected on a retried job — see
-  // Part O — and is not an error; there's simply nothing new to insert evidence for.
-  if (finding && input.evidence) {
-    await deps.db
-      .insert(schema.evidence)
-      .values({ findingId: finding.id, data: sanitizeEvidence(input.evidence) });
+  if (finding) {
+    if (input.evidence) {
+      await deps.db
+        .insert(schema.evidence)
+        .values({ findingId: finding.id, data: sanitizeEvidence(input.evidence) });
+    }
+    return finding.id;
   }
+
+  // A conflict (finding already exists) is expected on a retried job — see
+  // Part O — and is not an error; there's simply nothing new to insert
+  // evidence for, but the caller may still need the existing row's id.
+  const [existing] = await deps.db
+    .select({ id: schema.findings.id })
+    .from(schema.findings)
+    .where(
+      and(
+        eq(schema.findings.assessmentId, assessmentId),
+        eq(schema.findings.fingerprint, fingerprint),
+      ),
+    )
+    .limit(1);
+  return existing?.id ?? null;
 }
 
 const MAX_DISCOVERY_METADATA_BYTES = 4_000;

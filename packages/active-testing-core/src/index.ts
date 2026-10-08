@@ -1,3 +1,4 @@
+export { SECURITY_RESULTS, SKIP_REASONS, FAILURE_REASONS } from './types.js';
 export type {
   ActiveTestSafety,
   ActiveTestHttpMethod,
@@ -6,8 +7,13 @@ export type {
   Observation,
   ObservationDiff,
   ActiveTestFindingCandidate,
+  ActiveTestClassification,
+  SecurityResult,
+  SkipReason,
+  FailureReason,
   ActiveTestDefinition,
   ActiveTestPlanResult,
+  ActiveTestMutationAttempt,
   ActiveTestExecutionResult,
 } from './types.js';
 

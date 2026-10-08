@@ -68,7 +68,16 @@ export interface ScannerContext {
   scope: AssessmentScope;
   httpClient: SafeHttpClient;
   logger: ScannerLogger;
-  reportFinding: (input: ReportFindingInput) => Promise<void>;
+  /**
+   * Returns the created finding's id, or the id of the pre-existing finding
+   * when this call deduplicated against an identical fingerprint (e.g. a
+   * retried job) — or null in the (should-not-normally-happen) case neither
+   * could be resolved. Existing callers that don't need the id are
+   * unaffected; `await`-and-ignore remains valid. Added in Batch 10 so the
+   * active-testing executor can link an execution to the finding(s) it
+   * produced (see packages/active-testing-core).
+   */
+  reportFinding: (input: ReportFindingInput) => Promise<string | null>;
   /** Optional: only discovery-capable scanners report discovered URLs (Batch 6). */
   reportDiscoveredUrl?: (input: ReportDiscoveredUrlInput) => Promise<void>;
   signal: AbortSignal;

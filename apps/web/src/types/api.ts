@@ -222,6 +222,41 @@ export const ACTIVE_TEST_EXECUTION_STATUSES = [
 ] as const;
 export type ActiveTestExecutionStatus = (typeof ACTIVE_TEST_EXECUTION_STATUSES)[number];
 
+// Batch 10: the security verdict is a separate axis from `status` above —
+// "ran fine, found nothing" (COMPLETED + NO_FINDING) is a different fact
+// from "could not be run" (FAILED + INCONCLUSIVE). `null` means no verdict
+// was ever reached (CANCELLED/BUDGET_EXHAUSTED/SKIPPED, or a row that
+// predates this field) — "not applicable", never a false "no finding".
+export const ACTIVE_TEST_SECURITY_RESULTS = ['NO_FINDING', 'FINDING', 'INCONCLUSIVE'] as const;
+export type ActiveTestSecurityResult = (typeof ACTIVE_TEST_SECURITY_RESULTS)[number];
+
+export const ACTIVE_TEST_SKIP_REASONS = [
+  'NO_ELIGIBLE_TARGETS',
+  'NO_PARAMETERS',
+  'UNSUPPORTED_CONTENT_TYPE',
+  'LIMIT_REACHED',
+  'UNSUPPORTED_ASSET_TYPE',
+  'MISSING_CAPABILITY',
+] as const;
+export type ActiveTestSkipReason = (typeof ACTIVE_TEST_SKIP_REASONS)[number];
+
+export const ACTIVE_TEST_FAILURE_REASONS = [
+  'NETWORK_ERROR',
+  'SCOPE_REJECTED',
+  'SSRF_REJECTED',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+  'INVALID_TEST_CONFIGURATION',
+] as const;
+export type ActiveTestFailureReason = (typeof ACTIVE_TEST_FAILURE_REASONS)[number];
+
+export interface ActiveTestExecutionFindingRef {
+  id: string;
+  title: string;
+  severity: FindingSeverity;
+  confidence: FindingConfidence;
+}
+
 export interface ActiveTestExecution {
   id: string;
   planId: string;
@@ -230,8 +265,11 @@ export interface ActiveTestExecution {
   testVersion: string;
   target: string;
   status: ActiveTestExecutionStatus;
+  securityResult: ActiveTestSecurityResult | null;
+  skipReason: ActiveTestSkipReason | null;
+  failureReason: ActiveTestFailureReason | null;
   requestsUsed: number;
-  findingId: string | null;
+  findings: ActiveTestExecutionFindingRef[];
   durationMs: number | null;
   errorMessage: string | null;
   createdAt: string;

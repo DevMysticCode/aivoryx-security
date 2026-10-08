@@ -60,18 +60,27 @@ export const reflectedXssTest: ActiveTestDefinition = {
     // Cheap check first: if the canary itself wasn't found at all, there is
     // nothing to analyze — skip the (comparatively expensive) HTML parsing
     // pass entirely. See Batch 9 spec Part 36.
-    if (diff.markersDetected.length === 0) return null;
-    if (mutation.kind !== 'query-param') return null;
+    //
+    // Batch 10: this wrapper adapts classifyReflectedXss()'s unchanged
+    // `candidate | null` detection logic into the framework's normalized
+    // ActiveTestClassification shape. The actual confidence/encoding/
+    // context analysis in classify.ts is untouched — see Batch 10 spec
+    // Part 18 ("do not change its core detection behavior").
+    if (diff.markersDetected.length === 0 || mutation.kind !== 'query-param') {
+      return { securityResult: 'NO_FINDING' };
+    }
 
     const marker = mutation.markers?.[0];
-    if (!marker) return null;
+    if (!marker) return { securityResult: 'NO_FINDING' };
 
-    return classifyReflectedXss({
+    const candidate = classifyReflectedXss({
       contentType: mutated.contentType,
       body: mutated.body,
       marker,
       paramName: mutation.name,
     });
+
+    return candidate ? { securityResult: 'FINDING', candidate } : { securityResult: 'NO_FINDING' };
   },
 };
 

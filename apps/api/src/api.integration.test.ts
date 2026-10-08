@@ -1091,6 +1091,122 @@ describe.skipIf(!DATABASE_URL || !REDIS_URL)('API (integration)', () => {
       expect(body.pagination).toMatchObject({ total: 1, limit: 50, offset: 0 });
     }, 15_000);
 
+    it("lists an execution's linked finding(s) (Batch 10: execution -> finding via active_test_execution_findings)", async () => {
+      const { auth, assessmentId } = await setupAssessment('active-test-execution-findings');
+      const [plan] = await client.db
+        .insert(schema.activeTestPlans)
+        .values({ assessmentId, status: 'COMPLETED', requestBudget: 50, testsSelectedCount: 1 })
+        .returning();
+      const [execution] = await client.db
+        .insert(schema.activeTestExecutions)
+        .values({
+          planId: plan!.id,
+          assessmentId,
+          testId: 'WEB-REFLECTED-XSS',
+          testVersion: '1.0.0',
+          target: 'https://example.com/search?q=canary',
+          status: 'COMPLETED',
+          securityResult: 'FINDING',
+          requestsUsed: 2,
+        })
+        .returning();
+      const [finding] = await client.db
+        .insert(schema.findings)
+        .values({
+          assessmentId,
+          scanner: 'active-testing',
+          title: 'Potential reflected cross-site scripting (XSS)',
+          description: 'test finding',
+          severity: 'MEDIUM',
+          confidence: 'MEDIUM',
+          category: 'active-test',
+          target: 'https://example.com/search?q=canary',
+          key: 'reflected-xss:q',
+          fingerprint: 'a'.repeat(64),
+        })
+        .returning();
+      await client.db.insert(schema.activeTestExecutionFindings).values({
+        executionId: execution!.id,
+        findingId: finding!.id,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentId}/active-test-executions`,
+        ...auth,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.activeTestExecutions).toHaveLength(1);
+      expect(body.activeTestExecutions[0].securityResult).toBe('FINDING');
+      expect(body.activeTestExecutions[0].findings).toHaveLength(1);
+      expect(body.activeTestExecutions[0].findings[0]).toMatchObject({
+        id: finding!.id,
+        title: 'Potential reflected cross-site scripting (XSS)',
+        severity: 'MEDIUM',
+        confidence: 'MEDIUM',
+      });
+      // Only the minimal fields a list view needs — never evidence.
+      expect(body.activeTestExecutions[0].findings[0]).not.toHaveProperty('evidence');
+      expect(body.activeTestExecutions[0].findings[0]).not.toHaveProperty('description');
+    }, 15_000);
+
+    it("an organization cannot see another organization's execution->finding links (tenant isolation for the Batch 10 join)", async () => {
+      const ownerA = await registerAndLogin('active-test-finding-iso-a');
+      const { assessmentId: assessmentIdB } = await setupAssessment('active-test-finding-iso-b');
+      const [planB] = await client.db
+        .insert(schema.activeTestPlans)
+        .values({
+          assessmentId: assessmentIdB,
+          status: 'COMPLETED',
+          requestBudget: 50,
+          testsSelectedCount: 1,
+        })
+        .returning();
+      const [executionB] = await client.db
+        .insert(schema.activeTestExecutions)
+        .values({
+          planId: planB!.id,
+          assessmentId: assessmentIdB,
+          testId: 'WEB-REFLECTED-XSS',
+          testVersion: '1.0.0',
+          target: 'https://example.com/search?q=canary',
+          status: 'COMPLETED',
+          securityResult: 'FINDING',
+          requestsUsed: 2,
+        })
+        .returning();
+      const [findingB] = await client.db
+        .insert(schema.findings)
+        .values({
+          assessmentId: assessmentIdB,
+          scanner: 'active-testing',
+          title: 'Org B finding',
+          description: 'test finding',
+          severity: 'MEDIUM',
+          confidence: 'MEDIUM',
+          category: 'active-test',
+          target: 'https://example.com/search?q=canary',
+          key: 'reflected-xss:q',
+          fingerprint: 'b'.repeat(64),
+        })
+        .returning();
+      await client.db.insert(schema.activeTestExecutionFindings).values({
+        executionId: executionB!.id,
+        findingId: findingB!.id,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/assessments/${assessmentIdB}/active-test-executions`,
+        cookies: { [SESSION_COOKIE_NAME]: ownerA.sessionCookie },
+      });
+      // 404, not a 200 with an empty/leaked findings array — the existing
+      // getAssessmentContext tenant boundary gates this route before the
+      // join ever runs.
+      expect(response.statusCode).toBe(404);
+    }, 15_000);
+
     it('returns an empty array of active test definitions — zero ship in production this batch', async () => {
       const { auth, assessmentId } = await setupAssessment('active-test-definitions-empty');
       const response = await app.inject({

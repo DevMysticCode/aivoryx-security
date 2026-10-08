@@ -12,8 +12,10 @@ import { Button } from '../../components/ui/Button';
 import type {
   ActiveTestExecution,
   ActiveTestExecutionStatus,
+  ActiveTestFailureReason,
   ActiveTestPlan,
   ActiveTestPlanStatus,
+  ActiveTestSkipReason,
   AssessmentStatus,
 } from '../../types/api';
 
@@ -51,8 +53,64 @@ const EXECUTION_STATUS_TONE: Record<
   SKIPPED: 'neutral',
 };
 
+const SKIP_REASON_LABEL: Record<ActiveTestSkipReason, string> = {
+  NO_ELIGIBLE_TARGETS: 'no eligible targets',
+  NO_PARAMETERS: 'no parameters',
+  UNSUPPORTED_CONTENT_TYPE: 'unsupported content type',
+  LIMIT_REACHED: 'limit reached',
+  UNSUPPORTED_ASSET_TYPE: 'unsupported asset type',
+  MISSING_CAPABILITY: 'missing capability',
+};
+
+const FAILURE_REASON_LABEL: Record<ActiveTestFailureReason, string> = {
+  NETWORK_ERROR: 'network error',
+  SCOPE_REJECTED: 'scope rejected',
+  SSRF_REJECTED: 'SSRF rejected',
+  RATE_LIMITED: 'rate limited',
+  INTERNAL_ERROR: 'internal error',
+  INVALID_TEST_CONFIGURATION: 'invalid configuration',
+};
+
 function PlanStatusBadge({ status }: { status: ActiveTestPlanStatus }) {
   return <Badge tone={PLAN_STATUS_TONE[status]}>{PLAN_STATUS_LABEL[status]}</Badge>;
+}
+
+/**
+ * The per-row "Result" indicator — deliberately distinct from the generic
+ * execution Status badge (Batch 10 spec Part 20): a SKIPPED/FAILED
+ * execution explains itself (its reason), not just a bare status word, and
+ * a COMPLETED execution shows the actual security verdict rather than
+ * requiring the viewer to cross-reference the Finding column.
+ */
+function ResultBadge({ execution }: { execution: ActiveTestExecution }) {
+  if (execution.status === 'SKIPPED') {
+    return (
+      <Badge tone="neutral">
+        Skipped{execution.skipReason ? `: ${SKIP_REASON_LABEL[execution.skipReason]}` : ''}
+      </Badge>
+    );
+  }
+  if (execution.status === 'FAILED') {
+    return (
+      <Badge tone="destructive">
+        Failed{execution.failureReason ? `: ${FAILURE_REASON_LABEL[execution.failureReason]}` : ''}
+      </Badge>
+    );
+  }
+  if (execution.status === 'BUDGET_EXHAUSTED')
+    return <Badge tone="warning">Budget exhausted</Badge>;
+  if (execution.status === 'CANCELLED') return <Badge tone="neutral">Cancelled</Badge>;
+
+  switch (execution.securityResult) {
+    case 'FINDING':
+      return <Badge tone="destructive">Finding</Badge>;
+    case 'INCONCLUSIVE':
+      return <Badge tone="warning">Inconclusive</Badge>;
+    case 'NO_FINDING':
+      return <Badge tone="success">No finding</Badge>;
+    default:
+      return <span className="text-muted-foreground">—</span>;
+  }
 }
 
 export function ActiveTestingPanel({
@@ -165,7 +223,7 @@ export function ActiveTestingPanel({
           <DataTable
             rows={executionsQuery.data.activeTestExecutions}
             rowKey={(row) => row.id}
-            onRowClick={(row) => row.findingId && navigate(`/app/findings/${row.findingId}`)}
+            onRowClick={(row) => row.findings[0] && navigate(`/app/findings/${row.findings[0].id}`)}
             columns={[
               {
                 header: 'Test',
@@ -181,15 +239,25 @@ export function ActiveTestingPanel({
                   <Badge tone={EXECUTION_STATUS_TONE[row.status]}>{row.status}</Badge>
                 ),
               },
-              { header: 'Requests used', render: (row) => row.requestsUsed },
+              { header: 'Result', render: (row) => <ResultBadge execution={row} /> },
+              { header: 'Requests', render: (row) => row.requestsUsed },
               {
                 header: 'Finding',
-                render: (row) =>
-                  row.findingId ? (
-                    <Badge tone="warning">Reported</Badge>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  ),
+                render: (row) => {
+                  if (row.findings.length === 0) {
+                    return <span className="text-muted-foreground">No finding</span>;
+                  }
+                  // Clicking the row (onRowClick below) navigates to the
+                  // finding — this cell just names it so the viewer knows
+                  // what they're about to open.
+                  return (
+                    <span className="text-primary underline-offset-2 hover:underline">
+                      {row.findings.length === 1
+                        ? row.findings[0]!.title
+                        : `${row.findings.length} findings`}
+                    </span>
+                  );
+                },
               },
             ]}
           />

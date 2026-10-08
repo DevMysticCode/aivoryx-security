@@ -12,7 +12,7 @@ import type { ScannerPlugin } from '@aivoryx/scanner-core';
 import { ACTIVE_TEST_REGISTRY } from '@aivoryx/scanner-active-xss';
 import { createAssessmentJobProcessor } from './assessment-processor.js';
 
-// Requires live PostgreSQL with migrations applied through 0006 — see
+// Requires live PostgreSQL with migrations applied through 0008 — see
 // assessment-processor.integration.test.ts's header for exact run
 // instructions. No Redis needed: the processor is invoked directly with a
 // fake BullMQ Job, exactly like active-testing-phase.integration.test.ts,
@@ -244,9 +244,11 @@ describe.skipIf(!DATABASE_URL)('reflected XSS scanner (integration)', () => {
     expect(plan?.status).toBe('COMPLETED');
 
     // /vuln (1 baseline + 1 mutation) + /safe (1+1) + /api (1+1) + /noparams
-    // (1 baseline only, zero query params to mutate) = 7. Never dozens.
-    expect(requestLog.length).toBe(7);
-    expect(plan?.requestsUsed).toBe(7);
+    // (Batch 10: zero query parameters means mutations() returns [], which
+    // now skips the pair entirely BEFORE spending the baseline request —
+    // see executor.ts's NO_PARAMETERS check) = 6. Never dozens.
+    expect(requestLog.length).toBe(6);
+    expect(plan?.requestsUsed).toBe(6);
 
     const findings = await client.db
       .select()
@@ -287,8 +289,33 @@ describe.skipIf(!DATABASE_URL)('reflected XSS scanner (integration)', () => {
       .from(schema.activeTestExecutions)
       .where(eq(schema.activeTestExecutions.assessmentId, assessment.id));
     expect(executions).toHaveLength(4);
+
+    // Batch 10: no query parameters means SKIPPED/NO_PARAMETERS, zero
+    // requests — not a misleading COMPLETED with nothing to show for it.
     const noParamsExecution = executions.find((e) => e.target.includes('/noparams'));
-    expect(noParamsExecution?.requestsUsed).toBe(1);
+    expect(noParamsExecution?.status).toBe('SKIPPED');
+    expect(noParamsExecution?.skipReason).toBe('NO_PARAMETERS');
+    expect(noParamsExecution?.securityResult).toBeNull();
+    expect(noParamsExecution?.requestsUsed).toBe(0);
+
+    // Batch 10: the vulnerable execution's security result and its link to
+    // the finding it produced.
+    const vulnExecution = executions.find((e) => e.target.includes('/vuln'));
+    expect(vulnExecution?.status).toBe('COMPLETED');
+    expect(vulnExecution?.securityResult).toBe('FINDING');
+
+    const safeExecution = executions.find((e) => e.target.includes('/safe'));
+    expect(safeExecution?.securityResult).toBe('FINDING'); // LOW-confidence finding still counts as FINDING
+
+    const apiExecution = executions.find((e) => e.target.includes('/api'));
+    expect(apiExecution?.securityResult).toBe('NO_FINDING');
+
+    const executionFindingLinks = await client.db
+      .select()
+      .from(schema.activeTestExecutionFindings)
+      .where(eq(schema.activeTestExecutionFindings.executionId, vulnExecution!.id));
+    expect(executionFindingLinks).toHaveLength(1);
+    expect(executionFindingLinks[0]!.findingId).toBe(vulnFinding!.id);
   });
 
   it('stops immediately once the shared request budget is exhausted — never issues dozens/hundreds of requests regardless of how many parameters exist', async () => {
@@ -312,8 +339,13 @@ describe.skipIf(!DATABASE_URL)('reflected XSS scanner (integration)', () => {
       .from(schema.activeTestPlans)
       .where(eq(schema.activeTestPlans.assessmentId, assessment.id));
     expect(plan?.status).toBe('BUDGET_EXHAUSTED');
-    expect(plan?.requestsUsed).toBeLessThanOrEqual(3);
-    expect(requestLog.length).toBeLessThanOrEqual(3);
+    // Exact, not just bounded (Batch 10 spec Part 27: "do not assume the
+    // count is correct because unit tests pass" — verify through the real
+    // worker integration path too). The first URL completes fully (baseline
+    // + mutation = 2 requests); the second URL's baseline succeeds (3rd
+    // request) before its mutation is rejected for lack of budget.
+    expect(plan?.requestsUsed).toBe(3);
+    expect(requestLog.length).toBe(3);
 
     const [finalAssessment] = await client.db
       .select()
@@ -321,6 +353,29 @@ describe.skipIf(!DATABASE_URL)('reflected XSS scanner (integration)', () => {
       .where(eq(schema.assessments.id, assessment.id));
     // Budget exhaustion in this additive phase never fails the overall assessment.
     expect(finalAssessment?.status).toBe('COMPLETED');
+
+    // Batch 10 fix verified at the integration level, not just in
+    // active-testing-core's own unit tests: the second URL's execution row
+    // must show the ONE genuinely-attempted request, never 0 (the pre-fix
+    // behavior discarded this pair's partial progress entirely).
+    const executions = await client.db
+      .select()
+      .from(schema.activeTestExecutions)
+      .where(eq(schema.activeTestExecutions.assessmentId, assessment.id));
+    const statuses = executions.map((e) => e.status).sort();
+    expect(statuses).toEqual([
+      'BUDGET_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'COMPLETED',
+    ]);
+    const partialExecution = executions.find(
+      (e) => e.status === 'BUDGET_EXHAUSTED' && e.requestsUsed > 0,
+    );
+    expect(partialExecution).toBeDefined();
+    expect(partialExecution?.requestsUsed).toBe(1);
+    expect(partialExecution?.securityResult).toBeNull();
   });
 
   it('is idempotent: re-processing the same job never creates duplicate findings or execution rows', async () => {

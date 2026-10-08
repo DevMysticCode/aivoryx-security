@@ -12,7 +12,7 @@ import type { ActiveTestDefinition } from '@aivoryx/active-testing-core';
 import type { ScannerPlugin } from '@aivoryx/scanner-core';
 import { createAssessmentJobProcessor } from './assessment-processor.js';
 
-// Requires live PostgreSQL with migrations applied through 0006 — see
+// Requires live PostgreSQL with migrations applied through 0008 — see
 // assessment-processor.integration.test.ts's header for exact run
 // instructions (no Redis needed here: the processor function is invoked
 // directly with a fake BullMQ Job rather than through a real queue/worker —
@@ -81,13 +81,16 @@ const REFLECTION_FIXTURE: ActiveTestDefinition = {
   classify: (diff) =>
     diff.markersDetected.length > 0
       ? {
-          title: 'Reflected marker',
-          description: 'The marker was reflected unescaped',
-          severity: 'MEDIUM',
-          confidence: 'HIGH',
-          key: 'reflected-marker',
+          securityResult: 'FINDING',
+          candidate: {
+            title: 'Reflected marker',
+            description: 'The marker was reflected unescaped',
+            severity: 'MEDIUM',
+            confidence: 'HIGH',
+            key: 'reflected-marker',
+          },
         }
-      : null,
+      : { securityResult: 'NO_FINDING' },
 };
 
 describe.skipIf(!DATABASE_URL)('active-testing phase (integration)', () => {

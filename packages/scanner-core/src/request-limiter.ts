@@ -21,6 +21,18 @@ export class RequestLimiter {
     }
   }
 
+  /**
+   * Non-mutating capacity check — unlike consume(), a false result never
+   * increments the counter. Lets a caller verify multiple limiters have
+   * room before committing to any of them (see
+   * packages/active-testing-core's ActiveTestBudget), so a rejected
+   * reservation attempt is never counted as "used" — only calls that are
+   * actually followed by a real request should ever increment this.
+   */
+  hasCapacity(): boolean {
+    return this.used < this.maxRequests;
+  }
+
   get count(): number {
     return this.used;
   }

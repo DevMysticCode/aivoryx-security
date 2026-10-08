@@ -23,7 +23,7 @@ function fixtureDefinition(overrides: Partial<ActiveTestDefinition> = {}): Activ
     version: '1.0.0',
     markers: [],
     mutations: () => [],
-    classify: () => null,
+    classify: () => ({ securityResult: 'NO_FINDING' }),
     ...overrides,
   };
 }

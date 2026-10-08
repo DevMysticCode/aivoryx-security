@@ -1,6 +1,9 @@
 import type { AssessmentScope } from '@aivoryx/shared-types';
 import {
   RequestScheduler,
+  ScopeViolationError,
+  SsrfViolationError,
+  ResourceLimitExceededError,
   type ReportFindingInput,
   type SafeHttpClient,
   type ScannerLogger,
@@ -15,7 +18,9 @@ import type {
   ActiveTestMutationAttempt,
   ActiveTestPlanResult,
   BaselineRequestSpec,
+  FailureReason,
   Observation,
+  SecurityResult,
 } from './types.js';
 
 export interface ActiveTestExecutorContext {
@@ -29,14 +34,11 @@ export interface ActiveTestExecutorContext {
   requestBudget: number;
   maxConcurrentRequests: number;
   requestsPerSecond: number;
-  /** Reports a finding exactly like a ScannerPlugin would — same fingerprinting/evidence-sanitization pipeline (see apps/worker/src/assessment-processor.ts). */
-  reportFinding: (input: ReportFindingInput) => Promise<void>;
+  /** Reports a finding exactly like a ScannerPlugin would — same fingerprinting/evidence-sanitization pipeline (see apps/worker/src/assessment-processor.ts). Returns the finding's id (Batch 10) so the execution can be linked to it. */
+  reportFinding: (input: ReportFindingInput) => Promise<string | null>;
   /** Persists one test×target execution record — called for every pair, including ones that never ran because the plan was cancelled or ran out of budget. */
   onExecution: (result: ActiveTestExecutionResult) => Promise<void>;
 }
-
-/** Internal signal that the shared plan budget is exhausted — distinct from a SafeHttpClient-level ResourceLimitExceededError on a single request, which only fails that one pair. */
-class PlanBudgetExhausted extends Error {}
 
 function summarizeObservation(observation: Observation): Record<string, unknown> {
   return {
@@ -48,6 +50,62 @@ function summarizeObservation(observation: Observation): Record<string, unknown>
   };
 }
 
+/** Maps a caught error to a small, user-safe failure category — never exposes a raw stack trace (those stay in server-side logs only; see Batch 10 spec Part 16). */
+function classifyFailureReason(error: unknown): FailureReason {
+  if (error instanceof ScopeViolationError) return 'SCOPE_REJECTED';
+  if (error instanceof SsrfViolationError) return 'SSRF_REJECTED';
+  if (error instanceof ResourceLimitExceededError) return 'NETWORK_ERROR';
+  return 'INTERNAL_ERROR';
+}
+
+function cancelledResult(
+  definition: ActiveTestDefinition,
+  target: BaselineRequestSpec,
+): ActiveTestExecutionResult {
+  return {
+    testId: definition.id,
+    testVersion: definition.version,
+    target: target.url,
+    status: 'CANCELLED',
+    securityResult: null,
+    requestsUsed: 0,
+    mutationsAttempted: 0,
+    findingsReported: 0,
+    mutationResults: [],
+    baseline: null,
+    durationMs: 0,
+  };
+}
+
+function budgetExhaustedResult(
+  definition: ActiveTestDefinition,
+  target: BaselineRequestSpec,
+): ActiveTestExecutionResult {
+  return {
+    testId: definition.id,
+    testVersion: definition.version,
+    target: target.url,
+    status: 'BUDGET_EXHAUSTED',
+    securityResult: null,
+    requestsUsed: 0,
+    mutationsAttempted: 0,
+    findingsReported: 0,
+    mutationResults: [],
+    baseline: null,
+    durationMs: 0,
+  };
+}
+
+/**
+ * Runs one (target, definition) pair. Batch 10: checks `mutations()` BEFORE
+ * spending the baseline request (an empty list means there is nothing this
+ * definition can test against this target — e.g. no query parameters —
+ * which is a SKIPPED outcome, not a wasted request followed by a
+ * do-nothing COMPLETED). Budget exhaustion is now a normal return value
+ * (`status: 'BUDGET_EXHAUSTED'` carrying whatever was genuinely attempted
+ * so far), never a thrown exception that would discard that partial
+ * progress — see Batch 10 spec Parts 1/2/8.
+ */
 async function runOnePair(
   target: BaselineRequestSpec,
   definition: ActiveTestDefinition,
@@ -56,14 +114,20 @@ async function runOnePair(
   context: ActiveTestExecutorContext,
 ): Promise<ActiveTestExecutionResult> {
   const startedAt = Date.now();
-  let requestsUsed = 0;
 
   if (context.signal.aborted) {
+    return cancelledResult(definition, target);
+  }
+
+  const mutations = definition.mutations(target);
+  if (mutations.length === 0) {
     return {
       testId: definition.id,
       testVersion: definition.version,
       target: target.url,
-      status: 'CANCELLED',
+      status: 'SKIPPED',
+      securityResult: null,
+      skipReason: 'NO_PARAMETERS',
       requestsUsed: 0,
       mutationsAttempted: 0,
       findingsReported: 0,
@@ -74,11 +138,10 @@ async function runOnePair(
   }
 
   const execution = budget.forExecution(definition.requestBudgetEstimate);
+  let requestsUsed = 0;
 
-  try {
-    execution.consume();
-  } catch {
-    throw new PlanBudgetExhausted();
+  if (!execution.tryConsume()) {
+    return budgetExhaustedResult(definition, target);
   }
 
   let baselineObservation: Observation;
@@ -96,6 +159,8 @@ async function runOnePair(
         testVersion: definition.version,
         target: target.url,
         status: 'FAILED',
+        securityResult: 'INCONCLUSIVE',
+        failureReason: classifyFailureReason(error),
         requestsUsed,
         mutationsAttempted: 0,
         findingsReported: 0,
@@ -109,17 +174,18 @@ async function runOnePair(
     }
   }
 
-  const mutations = definition.mutations(target);
   const mutationResults: ActiveTestMutationAttempt[] = [];
   let findingsReported = 0;
+  let sawFinding = false;
+  let sawInconclusive = false;
+  let budgetExhaustedMidPair = false;
 
   for (const mutation of mutations) {
     if (context.signal.aborted) break;
 
-    try {
-      execution.consume();
-    } catch {
-      throw new PlanBudgetExhausted();
+    if (!execution.tryConsume()) {
+      budgetExhaustedMidPair = true;
+      break;
     }
 
     const mutatedUrl = applyMutation(new URL(target.url), mutation);
@@ -136,12 +202,15 @@ async function runOnePair(
         mutation.markers ?? definition.markers,
       );
       const diff = diffObservations(baselineObservation, observation);
-      const candidate = definition.classify(diff, baselineObservation, observation, mutation);
+      const classification = definition.classify(diff, baselineObservation, observation, mutation);
 
       let findingKey: string | null = null;
-      if (candidate) {
+      let findingId: string | null = null;
+      if (classification.securityResult === 'FINDING') {
+        const candidate = classification.candidate;
         findingKey = candidate.key;
         findingsReported += 1;
+        sawFinding = true;
         const reportInput: ReportFindingInput = {
           title: candidate.title,
           description: candidate.description,
@@ -158,10 +227,18 @@ async function runOnePair(
         };
         if (candidate.remediation !== undefined) reportInput.remediation = candidate.remediation;
         if (candidate.references !== undefined) reportInput.references = candidate.references;
-        await context.reportFinding(reportInput);
+        findingId = await context.reportFinding(reportInput);
+      } else if (classification.securityResult === 'INCONCLUSIVE') {
+        sawInconclusive = true;
       }
 
-      mutationResults.push({ mutation: { ...mutation }, result: { ...diff }, findingKey });
+      mutationResults.push({
+        mutation: { ...mutation },
+        result: { ...diff },
+        securityResult: classification.securityResult,
+        findingKey,
+        findingId,
+      });
     } catch (error) {
       // A single mutation's request failing (timeout, resource limit) doesn't
       // fail the whole pair — other mutations may still succeed. Logged for
@@ -171,17 +248,31 @@ async function runOnePair(
         { testId: definition.id, target: target.url, err: String(error) },
         'active test mutation request failed; continuing to next mutation',
       );
-      mutationResults.push({ mutation: { ...mutation }, result: null, findingKey: null });
+      mutationResults.push({
+        mutation: { ...mutation },
+        result: null,
+        securityResult: 'INCONCLUSIVE',
+        findingKey: null,
+        findingId: null,
+      });
+      sawInconclusive = true;
     } finally {
       release();
     }
   }
 
+  const securityResult: SecurityResult = sawFinding
+    ? 'FINDING'
+    : sawInconclusive
+      ? 'INCONCLUSIVE'
+      : 'NO_FINDING';
+
   return {
     testId: definition.id,
     testVersion: definition.version,
     target: target.url,
-    status: 'COMPLETED',
+    status: budgetExhaustedMidPair ? 'BUDGET_EXHAUSTED' : 'COMPLETED',
+    securityResult: budgetExhaustedMidPair ? null : securityResult,
     requestsUsed,
     mutationsAttempted: mutationResults.length,
     findingsReported,
@@ -194,10 +285,10 @@ async function runOnePair(
 /**
  * Runs every applicable active test definition against every baseline
  * target, cooperatively checking `signal.aborted` and the shared request
- * budget before each request. Stops immediately on budget exhaustion or
- * cancellation, recording every not-yet-attempted pair with an honest
+ * budget before each request. Stops once a pair reports BUDGET_EXHAUSTED or
+ * CANCELLED, recording every not-yet-attempted pair with an honest
  * terminal status rather than silently omitting it. See Batch 8 spec Parts
- * 9/11.
+ * 9/11; Batch 10 spec Parts 1/2/8 for the request-accounting fix.
  */
 export async function runActiveTestPlan(
   context: ActiveTestExecutorContext,
@@ -215,59 +306,39 @@ export async function runActiveTestPlan(
   let testsCompletedCount = 0;
   let testsFailedCount = 0;
   let testsSkippedCount = 0;
-  let requestsUsed = 0;
   let stoppedEarly: 'BUDGET_EXHAUSTED' | 'CANCELLED' | null = null;
 
   for (let i = 0; i < pairs.length; i += 1) {
     const { target, definition } = pairs[i]!;
 
-    if (context.signal.aborted) {
+    if (!stoppedEarly && context.signal.aborted) {
       stoppedEarly = 'CANCELLED';
     }
 
     if (stoppedEarly) {
       testsSkippedCount += 1;
-      await context.onExecution({
-        testId: definition.id,
-        testVersion: definition.version,
-        target: target.url,
-        status: stoppedEarly,
-        requestsUsed: 0,
-        mutationsAttempted: 0,
-        findingsReported: 0,
-        mutationResults: [],
-        baseline: null,
-        durationMs: 0,
-      });
+      await context.onExecution(
+        stoppedEarly === 'CANCELLED'
+          ? cancelledResult(definition, target)
+          : budgetExhaustedResult(definition, target),
+      );
       continue;
     }
 
-    try {
-      const result = await runOnePair(target, definition, budget, scheduler, context);
-      requestsUsed += result.requestsUsed;
-      if (result.status === 'FAILED') testsFailedCount += 1;
-      else testsCompletedCount += 1;
-      await context.onExecution(result);
-    } catch (error) {
-      if (error instanceof PlanBudgetExhausted) {
-        stoppedEarly = 'BUDGET_EXHAUSTED';
-        testsSkippedCount += 1;
-        await context.onExecution({
-          testId: definition.id,
-          testVersion: definition.version,
-          target: target.url,
-          status: 'BUDGET_EXHAUSTED',
-          requestsUsed: 0,
-          mutationsAttempted: 0,
-          findingsReported: 0,
-          mutationResults: [],
-          baseline: null,
-          durationMs: 0,
-        });
-        continue;
-      }
-      throw error;
+    const result = await runOnePair(target, definition, budget, scheduler, context);
+    if (result.status === 'FAILED') testsFailedCount += 1;
+    else if (result.status === 'BUDGET_EXHAUSTED') {
+      stoppedEarly = 'BUDGET_EXHAUSTED';
+      testsSkippedCount += 1;
+    } else if (result.status === 'CANCELLED') {
+      stoppedEarly = 'CANCELLED';
+      testsSkippedCount += 1;
+    } else if (result.status === 'SKIPPED') {
+      testsSkippedCount += 1;
+    } else {
+      testsCompletedCount += 1;
     }
+    await context.onExecution(result);
   }
 
   return {
@@ -276,6 +347,8 @@ export async function runActiveTestPlan(
     testsCompletedCount,
     testsFailedCount,
     testsSkippedCount,
-    requestsUsed,
+    // Authoritative — the budget's own counter, not a re-summed total. See
+    // ActiveTestPlanResult.requestsUsed's doc comment.
+    requestsUsed: budget.requestsUsed,
   };
 }

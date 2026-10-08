@@ -42,5 +42,14 @@ export {
   ACTIVE_TEST_EXECUTION_STATUSES,
   isActiveTestPlanStatus,
   isActiveTestExecutionStatus,
+  ACTIVE_TEST_SECURITY_RESULTS,
+  ACTIVE_TEST_SKIP_REASONS,
+  ACTIVE_TEST_FAILURE_REASONS,
 } from './active-testing.js';
-export type { ActiveTestPlanStatus, ActiveTestExecutionStatus } from './active-testing.js';
+export type {
+  ActiveTestPlanStatus,
+  ActiveTestExecutionStatus,
+  ActiveTestSecurityResult,
+  ActiveTestSkipReason,
+  ActiveTestFailureReason,
+} from './active-testing.js';

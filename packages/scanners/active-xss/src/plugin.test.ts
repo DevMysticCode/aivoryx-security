@@ -73,7 +73,7 @@ describe('reflectedXssTest', () => {
     }
   });
 
-  it('returns null from classify() when the mutation produced no marker match', () => {
+  it('returns NO_FINDING from classify() when the mutation produced no marker match', () => {
     const mutation = reflectedXssTest.mutations({
       url: 'https://example.com/search?q=hello',
       method: 'GET',
@@ -95,6 +95,38 @@ describe('reflectedXssTest', () => {
       bodyLengthDelta: 0,
       markersDetected: [],
     };
-    expect(reflectedXssTest.classify(diff, noopObservation, noopObservation, mutation)).toBeNull();
+    expect(reflectedXssTest.classify(diff, noopObservation, noopObservation, mutation)).toEqual({
+      securityResult: 'NO_FINDING',
+    });
+  });
+
+  it('returns a FINDING classification wrapping the candidate when classifyReflectedXss detects something', () => {
+    const mutation = reflectedXssTest.mutations({
+      url: 'https://example.com/search?q=hello',
+      method: 'GET',
+    })[0]!;
+    const marker = mutation.kind === 'query-param' ? mutation.markers?.[0] : undefined;
+    const observation = {
+      status: 200,
+      headers: {},
+      contentType: 'text/html',
+      bodyLength: 0,
+      bodyHash: '',
+      markersFound: marker ? [marker] : [],
+      body: `<script>var x = "${mutation.kind === 'query-param' ? mutation.value : ''}";</script>`,
+    };
+    const diff = {
+      statusChanged: false,
+      headersChanged: [],
+      contentTypeChanged: false,
+      bodyChanged: true,
+      bodyLengthDelta: 10,
+      markersDetected: marker ? [marker] : [],
+    };
+    const result = reflectedXssTest.classify(diff, observation, observation, mutation);
+    expect(result.securityResult).toBe('FINDING');
+    if (result.securityResult === 'FINDING') {
+      expect(result.candidate.severity).toBe('HIGH');
+    }
   });
 });

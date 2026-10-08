@@ -50,6 +50,20 @@
       "when": 1791388043202,
       "tag": "0006_nebulous_bloodstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791431380457,
+      "tag": "0007_sweet_tattoo",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791431397569,
+      "tag": "0008_sticky_leo",
+      "breakpoints": true
     }
   ]
 }

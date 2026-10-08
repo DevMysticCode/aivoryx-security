@@ -23,6 +23,9 @@ import type {
   AssessmentType,
   ActiveTestPlanStatus,
   ActiveTestExecutionStatus,
+  ActiveTestSecurityResult,
+  ActiveTestSkipReason,
+  ActiveTestFailureReason,
   DiscoveryMethod,
   FindingConfidence,
   FindingSeverity,
@@ -177,6 +180,31 @@ export const activeTestExecutionStatusEnum = pgEnum('active_test_execution_statu
   'CANCELLED',
   'BUDGET_EXHAUSTED',
   'SKIPPED',
+]);
+
+// Batch 10 — the security verdict (a separate axis from execution status
+// above), and structured skip/failure reasons. See
+// packages/active-testing-core's ActiveTestClassification.
+export const activeTestSecurityResultEnum = pgEnum('active_test_security_result', [
+  'NO_FINDING',
+  'FINDING',
+  'INCONCLUSIVE',
+]);
+export const activeTestSkipReasonEnum = pgEnum('active_test_skip_reason', [
+  'NO_ELIGIBLE_TARGETS',
+  'NO_PARAMETERS',
+  'UNSUPPORTED_CONTENT_TYPE',
+  'LIMIT_REACHED',
+  'UNSUPPORTED_ASSET_TYPE',
+  'MISSING_CAPABILITY',
+]);
+export const activeTestFailureReasonEnum = pgEnum('active_test_failure_reason', [
+  'NETWORK_ERROR',
+  'SCOPE_REJECTED',
+  'SSRF_REJECTED',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+  'INVALID_TEST_CONFIGURATION',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -750,6 +778,18 @@ export const activeTestExecutions = pgTable(
     testVersion: text('test_version').notNull(),
     target: text('target').notNull(),
     status: activeTestExecutionStatusEnum('status').$type<ActiveTestExecutionStatus>().notNull(),
+    // Batch 10: the security verdict, independent of `status` above — see
+    // activeTestSecurityResultEnum's comment. NULL for CANCELLED/
+    // BUDGET_EXHAUSTED/SKIPPED (no verdict was ever reached — "not
+    // applicable", never a false NO_FINDING) and for rows that predate this
+    // column (no backfill — see Batch 10 spec Part 25).
+    securityResult:
+      activeTestSecurityResultEnum('security_result').$type<ActiveTestSecurityResult>(),
+    skipReason: activeTestSkipReasonEnum('skip_reason').$type<ActiveTestSkipReason>(),
+    failureReason: activeTestFailureReasonEnum('failure_reason').$type<ActiveTestFailureReason>(),
+    // Authoritative count of real requests this execution issued — see
+    // packages/active-testing-core's ActiveTestBudget (Batch 10 fixed this
+    // to never under/over-count).
     requestsUsed: integer('requests_used').notNull().default(0),
     // Sanitized, structured facts only — never a raw request/response body.
     // See packages/active-testing-core's Observation/ObservationDiff and
@@ -757,7 +797,6 @@ export const activeTestExecutions = pgTable(
     mutation: jsonb('mutation').$type<Record<string, unknown>>(),
     baseline: jsonb('baseline').$type<Record<string, unknown>>(),
     result: jsonb('result').$type<Record<string, unknown>>(),
-    findingId: uuid('finding_id').references(() => findings.id, { onDelete: 'set null' }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
     durationMs: integer('duration_ms'),
@@ -774,6 +813,39 @@ export const activeTestExecutions = pgTable(
       table.planId,
       table.testId,
       table.target,
+    ),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Active test execution <-> finding (Batch 10). A junction table, not a
+// single nullable FK on active_test_executions (which never worked — it was
+// always NULL in every shipped version and is dropped in this migration):
+// one execution can legitimately produce zero, one, or several findings
+// (e.g. two independently-vulnerable query parameters discovered by the
+// same WEB-REFLECTED-XSS execution against the same URL). See
+// packages/active-testing-core's executor.ts.
+// ---------------------------------------------------------------------------
+
+export const activeTestExecutionFindings = pgTable(
+  'active_test_execution_findings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    executionId: uuid('execution_id')
+      .notNull()
+      .references(() => activeTestExecutions.id, { onDelete: 'cascade' }),
+    findingId: uuid('finding_id')
+      .notNull()
+      .references(() => findings.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    findingIdIdx: index('active_test_execution_findings_finding_id_idx').on(table.findingId),
+    // A retried worker attempt re-linking the same execution to the same
+    // finding must be a safe no-op, never a duplicate row.
+    executionFindingUnique: uniqueIndex('active_test_execution_findings_unique').on(
+      table.executionId,
+      table.findingId,
     ),
   }),
 );

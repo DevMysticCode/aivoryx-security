@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Queue } from 'bullmq';
 import { schema, type AuditService } from '@aivoryx/db';
@@ -373,7 +373,11 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
 
     /**
      * Paginated active-test executions for this assessment — read-only,
-     * scanner-generated exactly like findings/discoveredUrls (Part T).
+     * scanner-generated exactly like findings/discoveredUrls (Part T). Each
+     * execution carries the findings it produced (Batch 10: via
+     * active_test_execution_findings — never a direct client-supplied id,
+     * so this join can never become a cross-tenant lookup), with only the
+     * minimal fields a list view needs — never evidence or other raw data.
      */
     async listActiveTestExecutions(
       identity: RequestIdentity,
@@ -388,7 +392,7 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
       const offset = Math.max(filters.offset ?? 0, 0);
       const where = eq(schema.activeTestExecutions.assessmentId, assessmentId);
 
-      const [items, totalRows] = await Promise.all([
+      const [executions, totalRows] = await Promise.all([
         deps.db
           .select()
           .from(schema.activeTestExecutions)
@@ -401,6 +405,39 @@ export function createAssessmentsService(deps: AssessmentsServiceDeps) {
           .from(schema.activeTestExecutions)
           .where(where),
       ]);
+
+      const executionIds = executions.map((e) => e.id);
+      const findingLinks =
+        executionIds.length === 0
+          ? []
+          : await deps.db
+              .select({
+                executionId: schema.activeTestExecutionFindings.executionId,
+                id: schema.findings.id,
+                title: schema.findings.title,
+                severity: schema.findings.severity,
+                confidence: schema.findings.confidence,
+              })
+              .from(schema.activeTestExecutionFindings)
+              .innerJoin(
+                schema.findings,
+                eq(schema.findings.id, schema.activeTestExecutionFindings.findingId),
+              )
+              .where(inArray(schema.activeTestExecutionFindings.executionId, executionIds));
+
+      const findingsByExecutionId = new Map<string, typeof findingLinks>();
+      for (const link of findingLinks) {
+        const existing = findingsByExecutionId.get(link.executionId);
+        if (existing) existing.push(link);
+        else findingsByExecutionId.set(link.executionId, [link]);
+      }
+
+      const items = executions.map((execution) => ({
+        ...execution,
+        findings: (findingsByExecutionId.get(execution.id) ?? []).map(
+          ({ id, title, severity, confidence }) => ({ id, title, severity, confidence }),
+        ),
+      }));
 
       return { items, total: totalRows[0]?.count ?? 0, limit, offset };
     },
